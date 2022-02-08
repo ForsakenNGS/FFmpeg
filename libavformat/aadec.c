@@ -85,13 +85,14 @@ static int aa_read_header(AVFormatContext *s)
     AADemuxContext *c = s->priv_data;
     AVIOContext *pb = s->pb;
     AVStream *st;
+    int ret;
 
     /* parse .aa header */
     avio_skip(pb, 4); // file size
     avio_skip(pb, 4); // magic string
     toc_size = avio_rb32(pb); // TOC size
     avio_skip(pb, 4); // unidentified integer
-    if (toc_size > MAX_TOC_ENTRIES)
+    if (toc_size > MAX_TOC_ENTRIES || toc_size < 2)
         return AVERROR_INVALIDDATA;
     for (i = 0; i < toc_size; i++) { // read TOC
         avio_skip(pb, 4); // TOC entry index
@@ -118,8 +119,12 @@ static int aa_read_header(AVFormatContext *s)
             header_seed = atoi(val);
         } else if (!strcmp(key, "HeaderKey")) { // this looks like "1234567890 1234567890 1234567890 1234567890"
             av_log(s, AV_LOG_DEBUG, "HeaderKey is <%s>\n", val);
-            sscanf(val, "%"SCNu32"%"SCNu32"%"SCNu32"%"SCNu32,
+
+            ret = sscanf(val, "%"SCNu32"%"SCNu32"%"SCNu32"%"SCNu32,
                    &header_key_part[0], &header_key_part[1], &header_key_part[2], &header_key_part[3]);
+            if (ret != 4)
+                return AVERROR_INVALIDDATA;
+
             for (idx = 0; idx < 4; idx++) {
                 AV_WB32(&header_key[idx * 4], header_key_part[idx]); // convert each part to BE!
             }
@@ -218,7 +223,8 @@ static int aa_read_header(AVFormatContext *s)
     while ((chapter_pos = avio_tell(pb)) >= 0 && chapter_pos < c->content_end) {
         int chapter_idx = s->nb_chapters;
         uint32_t chapter_size = avio_rb32(pb);
-        if (chapter_size == 0) break;
+        if (chapter_size == 0 || avio_feof(pb))
+            break;
         chapter_pos -= start + CHAPTER_HEADER_SIZE * chapter_idx;
         avio_skip(pb, 4 + chapter_size);
         if (!avpriv_new_chapter(s, chapter_idx, st->time_base,

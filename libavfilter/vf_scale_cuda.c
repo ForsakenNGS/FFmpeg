@@ -48,7 +48,8 @@ static const enum AVPixelFormat supported_formats[] = {
     AV_PIX_FMT_NV12,
     AV_PIX_FMT_YUV444P,
     AV_PIX_FMT_P010,
-    AV_PIX_FMT_P016
+    AV_PIX_FMT_P016,
+    AV_PIX_FMT_YUV444P16,
 };
 
 #define DIV_UP(a, b) ( ((a) + (b) - 1) / (b) )
@@ -515,7 +516,7 @@ static int call_resize_kernel(AVFilterContext *ctx, CUfunction func, int channel
         .res.pitch2D.numChannels = channels,
         .res.pitch2D.width = src_width,
         .res.pitch2D.height = src_height,
-        .res.pitch2D.pitchInBytes = src_pitch,
+        .res.pitch2D.pitchInBytes = src_pitch * pixel_size,
         .res.pitch2D.devPtr = (CUdeviceptr)src_dptr,
     };
 
@@ -539,35 +540,81 @@ static int scalecuda_resize(AVFilterContext *ctx,
 {
     CUDAScaleContext *s = ctx->priv;
 
-#define DEPTH_BYTES(depth) (((depth) + 7) / 8)
-
-    call_resize_kernel(ctx, s->cu_func_luma, 1,
-                       in->data[0], in->width, in->height, in->linesize[0],
-                       out->data[0], out->width, out->height, out->linesize[0],
-                       DEPTH_BYTES(s->in_desc->comp[0].depth));
-
-    call_resize_kernel(ctx, s->cu_func_chroma_u, s->in_planes == 2 ? 2 : 1,
-                       in->data[1],
-                       AV_CEIL_RSHIFT(in->width,  s->in_desc->log2_chroma_w),
-                       AV_CEIL_RSHIFT(in->height, s->in_desc->log2_chroma_h),
-                       in->linesize[1],
-                       out->data[1],
-                       AV_CEIL_RSHIFT(out->width,  s->out_desc->log2_chroma_w),
-                       AV_CEIL_RSHIFT(out->height, s->out_desc->log2_chroma_h),
-                       out->linesize[1],
-                       DEPTH_BYTES(s->in_desc->comp[1].depth));
-
-    if (s->cu_func_chroma_v) {
-        call_resize_kernel(ctx, s->cu_func_chroma_v, s->in_planes == 2 ? 2 : 1,
-                           in->data[s->in_desc->comp[2].plane],
-                           AV_CEIL_RSHIFT(in->width,       s->in_desc->log2_chroma_w),
-                           AV_CEIL_RSHIFT(in->height,      s->in_desc->log2_chroma_h),
-                           in->linesize[s->in_desc->comp[2].plane],
-                           out->data[s->out_desc->comp[2].plane] + s->out_desc->comp[2].offset,
-                           AV_CEIL_RSHIFT(out->width,       s->out_desc->log2_chroma_w),
-                           AV_CEIL_RSHIFT(out->height,      s->out_desc->log2_chroma_h),
-                           out->linesize[s->out_desc->comp[2].plane],
-                           DEPTH_BYTES(s->in_desc->comp[2].depth));
+    switch (in_frames_ctx->sw_format) {
+    case AV_PIX_FMT_YUV420P:
+        call_resize_kernel(ctx, s->cu_func_uchar, 1,
+                           in->data[0], in->width, in->height, in->linesize[0],
+                           out->data[0], out->width, out->height, out->linesize[0],
+                           1);
+        call_resize_kernel(ctx, s->cu_func_uchar, 1,
+                           in->data[1], in->width/2, in->height/2, in->linesize[0]/2,
+                           out->data[1], out->width/2, out->height/2, out->linesize[0]/2,
+                           1);
+        call_resize_kernel(ctx, s->cu_func_uchar, 1,
+                           in->data[2], in->width/2, in->height/2, in->linesize[0]/2,
+                           out->data[2], out->width/2, out->height/2, out->linesize[0]/2,
+                           1);
+        break;
+    case AV_PIX_FMT_YUV444P:
+        call_resize_kernel(ctx, s->cu_func_uchar, 1,
+                           in->data[0], in->width, in->height, in->linesize[0],
+                           out->data[0], out->width, out->height, out->linesize[0],
+                           1);
+        call_resize_kernel(ctx, s->cu_func_uchar, 1,
+                           in->data[1], in->width, in->height, in->linesize[0],
+                           out->data[1], out->width, out->height, out->linesize[0],
+                           1);
+        call_resize_kernel(ctx, s->cu_func_uchar, 1,
+                           in->data[2], in->width, in->height, in->linesize[0],
+                           out->data[2], out->width, out->height, out->linesize[0],
+                           1);
+        break;
+    case AV_PIX_FMT_YUV444P16:
+        call_resize_kernel(ctx, s->cu_func_ushort, 1,
+                           in->data[0], in->width, in->height, in->linesize[0] / 2,
+                           out->data[0], out->width, out->height, out->linesize[0] / 2,
+                           2);
+        call_resize_kernel(ctx, s->cu_func_ushort, 1,
+                           in->data[1], in->width, in->height, in->linesize[1] / 2,
+                           out->data[1], out->width, out->height, out->linesize[1] / 2,
+                           2);
+        call_resize_kernel(ctx, s->cu_func_ushort, 1,
+                           in->data[2], in->width, in->height, in->linesize[2] / 2,
+                           out->data[2], out->width, out->height, out->linesize[2] / 2,
+                           2);
+        break;
+    case AV_PIX_FMT_NV12:
+        call_resize_kernel(ctx, s->cu_func_uchar, 1,
+                           in->data[0], in->width, in->height, in->linesize[0],
+                           out->data[0], out->width, out->height, out->linesize[0],
+                           1);
+        call_resize_kernel(ctx, s->cu_func_uchar2, 2,
+                           in->data[1], in->width/2, in->height/2, in->linesize[1],
+                           out->data[1], out->width/2, out->height/2, out->linesize[1]/2,
+                           1);
+        break;
+    case AV_PIX_FMT_P010LE:
+        call_resize_kernel(ctx, s->cu_func_ushort, 1,
+                           in->data[0], in->width, in->height, in->linesize[0]/2,
+                           out->data[0], out->width, out->height, out->linesize[0]/2,
+                           2);
+        call_resize_kernel(ctx, s->cu_func_ushort2, 2,
+                           in->data[1], in->width / 2, in->height / 2, in->linesize[1]/2,
+                           out->data[1], out->width / 2, out->height / 2, out->linesize[1] / 4,
+                           2);
+        break;
+    case AV_PIX_FMT_P016LE:
+        call_resize_kernel(ctx, s->cu_func_ushort, 1,
+                           in->data[0], in->width, in->height, in->linesize[0] / 2,
+                           out->data[0], out->width, out->height, out->linesize[0] / 2,
+                           2);
+        call_resize_kernel(ctx, s->cu_func_ushort2, 2,
+                           in->data[1], in->width / 2, in->height / 2, in->linesize[1] / 2,
+                           out->data[1], out->width / 2, out->height / 2, out->linesize[1] / 4,
+                           2);
+        break;
+    default:
+        return AVERROR_BUG;
     }
 
     return 0;

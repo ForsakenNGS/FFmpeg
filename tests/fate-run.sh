@@ -5,7 +5,7 @@ export LC_ALL=C
 base=$(dirname $0)
 . "${base}/md5.sh"
 
-base64=tests/base64
+base64=tests/base64${HOSTEXECSUF}
 
 test="${1#fate-}"
 target_samples=$2
@@ -45,7 +45,7 @@ compare(){
 }
 
 do_tiny_psnr(){
-    psnr=$(tests/tiny_psnr "$1" "$2" $cmp_unit $cmp_shift 0) || return 1
+    psnr=$(tests/tiny_psnr${HOSTEXECSUF} "$1" "$2" $cmp_unit $cmp_shift 0) || return 1
     val=$(expr "$psnr" : ".*$3: *\([0-9.]*\)")
     size1=$(expr "$psnr" : '.*bytes: *\([0-9]*\)')
     size2=$(expr "$psnr" : '.*bytes:[ 0-9]*/ *\([0-9]*\)')
@@ -206,7 +206,7 @@ enc_dec(){
     ffmpeg $8 $DEC_OPTS -i $tencfile $ENC_OPTS $dec_opt $FLAGS \
         -f $dec_fmt -y $tdecfile || return
     do_md5sum $decfile
-    tests/tiny_psnr $srcfile $decfile $cmp_unit $cmp_shift
+    tests/tiny_psnr${HOSTEXECSUF} $srcfile $decfile $cmp_unit $cmp_shift
 }
 
 transcode(){
@@ -296,7 +296,7 @@ lavf_container(){
     outdir="tests/data/lavf"
     file=${outdir}/lavf.$t
     do_avconv $file $DEC_OPTS -f image2 -c:v pgmyuv -i $raw_src $DEC_OPTS -ar 44100 -f s16le $1 -i $pcm_src "$ENC_OPTS -metadata title=lavftest" -b:a 64k -t 1 -qscale:v 10 $2
-    test $3 = "disable_crc" ||
+    test "$3" = "disable_crc" ||
         do_avconv_crc $file $DEC_OPTS -i $target_path/$file $3
 }
 
@@ -455,7 +455,7 @@ audio_match(){
     cleanfiles="$cleanfiles $decfile"
 
     ffmpeg -i "$sample" -bitexact $extra_args -y $decfile
-    tests/audiomatch $decfile $trefile
+    tests/audiomatch${HOSTEXECSUF} $decfile $trefile
 }
 
 concat(){

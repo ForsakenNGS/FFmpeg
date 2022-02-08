@@ -296,9 +296,8 @@ int ff_h264_update_thread_context(AVCodecContext *dst,
     if (dst == src)
         return 0;
 
-    // We can't fail if SPS isn't set at it breaks current skip_frame code
-    //if (!h1->ps.sps)
-    //    return AVERROR_INVALIDDATA;
+    if (inited && !h1->ps.sps)
+        return AVERROR_INVALIDDATA;
 
     if (inited &&
         (h->width                 != h1->width                 ||
@@ -920,6 +919,11 @@ static int h264_slice_header_init(H264Context *h)
     const SPS *sps = h->ps.sps;
     int i, ret;
 
+    if (!sps) {
+        ret = AVERROR_INVALIDDATA;
+        goto fail;
+    }
+
     ff_set_sar(h->avctx, sps->sar);
     av_pix_fmt_get_chroma_sub_sample(h->avctx->pix_fmt,
                                      &h->chroma_x_shift, &h->chroma_y_shift);
@@ -1091,6 +1095,12 @@ static int h264_init_ps(H264Context *h, const H264SliceContext *sl, int first_sl
                 h->avctx->color_trc       = sps->color_trc;
                 h->avctx->colorspace      = sps->colorspace;
             }
+        }
+
+        if (h->sei.alternative_transfer.present &&
+            av_color_transfer_name(h->sei.alternative_transfer.preferred_transfer_characteristics) &&
+            h->sei.alternative_transfer.preferred_transfer_characteristics != AVCOL_TRC_UNSPECIFIED) {
+            h->avctx->color_trc = h->sei.alternative_transfer.preferred_transfer_characteristics;
         }
     }
 
@@ -1330,12 +1340,6 @@ static int h264_export_frame_props(H264Context *h)
             tc_sd[i + 1] = tc;
         }
         h->sei.picture_timing.timecode_cnt = 0;
-    }
-
-    if (h->sei.alternative_transfer.present &&
-        av_color_transfer_name(h->sei.alternative_transfer.preferred_transfer_characteristics) &&
-        h->sei.alternative_transfer.preferred_transfer_characteristics != AVCOL_TRC_UNSPECIFIED) {
-        h->avctx->color_trc = cur->f->color_trc = h->sei.alternative_transfer.preferred_transfer_characteristics;
     }
 
     return 0;

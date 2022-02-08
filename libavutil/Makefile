@@ -82,6 +82,7 @@ HEADERS = adler32.h                                                     \
           tea.h                                                         \
           extlib.h                                                      \
 #^PLEX
+          tx.h                                                          \
 
 HEADERS-$(CONFIG_LZO)                   += lzo.h
 
@@ -164,6 +165,7 @@ OBJS = adler32.o                                                        \
        xga_font_data.o                                                  \
        xtea.o                                                           \
        tea.o                                                            \
+       tx.o                                                             \
 
 OBJS-$(CONFIG_CUDA)                     += hwcontext_cuda.o
 OBJS-$(CONFIG_D3D11VA)                  += hwcontext_d3d11va.o

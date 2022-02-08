@@ -444,6 +444,10 @@ static int cfhd_decode(AVCodecContext *avctx, void *data, int *got_frame,
                 avpriv_report_missing_feature(avctx, "Transform type of %"PRIu16, data);
                 ret = AVERROR_PATCHWELCOME;
                 break;
+            } else if (data == 1) {
+                av_log(avctx, AV_LOG_ERROR, "unsupported transform type\n");
+                ret = AVERROR_PATCHWELCOME;
+                break;
             }
             av_log(avctx, AV_LOG_DEBUG, "Transform-type? %"PRIu16"\n", data);
         } else if (abstag >= 0x4000 && abstag <= 0x40ff) {
@@ -546,6 +550,12 @@ static int cfhd_decode(AVCodecContext *avctx, void *data, int *got_frame,
             s->peak.level   = 0;
         } else if (tag == -74 && s->peak.offset) {
             s->peak.level = data;
+            if (s->peak.offset < 4 - bytestream2_tell(&s->peak.base) ||
+                s->peak.offset > 4 + bytestream2_get_bytes_left(&s->peak.base)
+            ) {
+                ret = AVERROR_INVALIDDATA;
+                goto end;
+            }
             bytestream2_seek(&s->peak.base, s->peak.offset - 4, SEEK_CUR);
         } else
             av_log(avctx, AV_LOG_DEBUG,  "Unknown tag %i data %x\n", tag, data);
@@ -884,6 +894,8 @@ static int cfhd_decode(AVCodecContext *avctx, void *data, int *got_frame,
             high = s->plane[plane].l_h[7];
             for (i = 0; i < lowpass_height * 2; i++) {
                 horiz_filter_clip(dst, low, high, lowpass_width, s->bpc);
+                if (avctx->pix_fmt == AV_PIX_FMT_GBRAP12 && act_plane == 3)
+                    process_alpha(dst, lowpass_width * 2);
                 low  += lowpass_width;
                 high += lowpass_width;
                 dst  += pic->linesize[act_plane] / 2;

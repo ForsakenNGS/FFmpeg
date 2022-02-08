@@ -286,8 +286,14 @@ static int dxtory_decode_v2(AVCodecContext *avctx, AVFrame *pic,
 
     off_check = off;
     gb_check = gb;
-    for (slice = 0; slice < nslices; slice++)
-        off_check += bytestream2_get_le32(&gb_check);
+    for (slice = 0; slice < nslices; slice++) {
+        slice_size = bytestream2_get_le32(&gb_check);
+
+        if (slice_size <= 16 + (avctx->height * avctx->width / (8 * nslices)))
+            return AVERROR_INVALIDDATA;
+        off_check += slice_size;
+    }
+
     if (off_check - avctx->discard_damaged_percentage*off_check/100 > src_size)
         return AVERROR_INVALIDDATA;
 
@@ -450,7 +456,7 @@ static int dx2_decode_slice_410(GetBitContext *gb, AVFrame *frame,
             V[x >> 2] = decode_sym(gb, lru[2]) ^ 0x80;
         }
 
-        Y += ystride << 2;
+        Y += ystride * 4;
         U += ustride;
         V += vstride;
     }
@@ -495,7 +501,7 @@ static int dx2_decode_slice_420(GetBitContext *gb, AVFrame *frame,
             V[x >> 1] = decode_sym(gb, lru[2]) ^ 0x80;
         }
 
-        Y += ystride << 1;
+        Y += ystride * 2;
         U += ustride;
         V += vstride;
     }

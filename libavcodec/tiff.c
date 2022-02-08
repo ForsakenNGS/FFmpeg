@@ -56,7 +56,9 @@ typedef struct TiffContext {
 
     int get_subimage;
     uint16_t get_page;
+    int get_thumbnail;
 
+    enum TiffType tiff_type;
     int width, height;
     unsigned int bpp, bppcount;
     uint32_t palette[256];
@@ -70,6 +72,8 @@ typedef struct TiffContext {
     int predictor;
     int fill_order;
     uint32_t res[4];
+    int is_thumbnail;
+    unsigned last_tag;
 
     int is_bayer;
     uint8_t pattern[4];
@@ -93,6 +97,11 @@ typedef struct TiffContext {
     int geotag_count;
     TiffGeoTag *geotags;
 } TiffContext;
+
+static void tiff_set_type(TiffContext *s, enum TiffType tiff_type) {
+    if (s->tiff_type < tiff_type) // Prioritize higher-valued entries
+        s->tiff_type = tiff_type;
+}
 
 static void free_geotags(TiffContext *const s)
 {
@@ -925,6 +934,12 @@ static int tiff_decode_tag(TiffContext *s, AVFrame *frame)
     if (ret < 0) {
         goto end;
     }
+    if (tag <= s->last_tag)
+        return AVERROR_INVALIDDATA;
+
+    // We ignore TIFF_STRIP_SIZE as it is sometimes in the logic but wrong order around TIFF_STRIP_OFFS
+    if (tag != TIFF_STRIP_SIZE)
+        s->last_tag = tag;
 
     off = bytestream2_tell(&s->gb);
     if (count == 1) {
@@ -948,6 +963,8 @@ static int tiff_decode_tag(TiffContext *s, AVFrame *frame)
     }
 
     switch (tag) {
+    case TIFF_SUBFILE:
+        s->is_thumbnail = (value != 0);
     case TIFF_WIDTH:
         s->width = value;
         break;
@@ -955,7 +972,7 @@ static int tiff_decode_tag(TiffContext *s, AVFrame *frame)
         s->height = value;
         break;
     case TIFF_BPP:
-        if (count > 5U) {
+        if (count > 5 || count <= 0) {
             av_log(s->avctx, AV_LOG_ERROR,
                    "This format is not supported (bpp=%d, %d components)\n",
                    value, count);
@@ -986,9 +1003,9 @@ static int tiff_decode_tag(TiffContext *s, AVFrame *frame)
                    "Samples per pixel requires a single value, many provided\n");
             return AVERROR_INVALIDDATA;
         }
-        if (value > 5U) {
+        if (value > 5 || value <= 0) {
             av_log(s->avctx, AV_LOG_ERROR,
-                   "Samples per pixel %d is too large\n", value);
+                   "Invalid samples per pixel %d\n", value);
             return AVERROR_INVALIDDATA;
         }
         if (s->bppcount == 1)
@@ -1086,9 +1103,12 @@ static int tiff_decode_tag(TiffContext *s, AVFrame *frame)
         s->predictor = value;
         break;
     case TIFF_SUB_IFDS:
-        s->sub_ifd = value;
+        if (count == 1)
+            s->sub_ifd = value;
+        else if (count > 1)
+            s->sub_ifd = ff_tget(&s->gb, TIFF_LONG, s->le); /** Only get the first SubIFD */
         break;
-    case TIFF_WHITE_LEVEL:
+    case DNG_WHITE_LEVEL:
         s->white_level = value;
         break;
     case TIFF_CFA_PATTERN_DIM:
@@ -1339,6 +1359,27 @@ static int tiff_decode_tag(TiffContext *s, AVFrame *frame)
     case TIFF_SOFTWARE_NAME:
         ADD_METADATA(count, "software", NULL);
         break;
+    case DNG_VERSION:
+        if (count == 4) {
+            unsigned int ver[4];
+            ver[0] = ff_tget(&s->gb, type, s->le);
+            ver[1] = ff_tget(&s->gb, type, s->le);
+            ver[2] = ff_tget(&s->gb, type, s->le);
+            ver[3] = ff_tget(&s->gb, type, s->le);
+
+            av_log(s->avctx, AV_LOG_DEBUG, "DNG file, version %u.%u.%u.%u\n",
+                ver[0], ver[1], ver[2], ver[3]);
+
+            tiff_set_type(s, TIFF_TYPE_DNG);
+        }
+        break;
+    case CINEMADNG_TIME_CODES:
+    case CINEMADNG_FRAME_RATE:
+    case CINEMADNG_T_STOP:
+    case CINEMADNG_REEL_NAME:
+    case CINEMADNG_CAMERA_LABEL:
+        tiff_set_type(s, TIFF_TYPE_CINEMADNG);
+        break;
     default:
         if (s->avctx->err_recognition & AV_EF_EXPLODE) {
             av_log(s->avctx, AV_LOG_ERROR,
@@ -1365,7 +1406,7 @@ static int decode_frame(AVCodecContext *avctx,
     TiffContext *const s = avctx->priv_data;
     AVFrame *const p = data;
     ThreadFrame frame = { .f = data };
-    unsigned off;
+    unsigned off, last_off;
     int le, ret, plane, planes;
     int i, j, entries, stride;
     unsigned soff, ssize;
@@ -1387,6 +1428,7 @@ static int decode_frame(AVCodecContext *avctx,
     s->le          = le;
     // TIFF_BPP is not a required tag and defaults to 1
 again:
+    s->is_thumbnail = 0;
     s->bppcount    = s->bpp = 1;
     s->photometric = TIFF_PHOTOMETRIC_NONE;
     s->compr       = TIFF_RAW;
@@ -1394,6 +1436,8 @@ again:
     s->white_level = 0;
     s->is_bayer    = 0;
     s->cur_page    = 0;
+    s->tiff_type   = TIFF_TYPE_TIFF;
+    s->last_tag    = 0;
     free_geotags(s);
 
     // Reset these offsets so we can tell if they were set this frame
@@ -1408,11 +1452,17 @@ again:
             return ret;
     }
 
-    /** whether we should look for this IFD's SubIFD */
-    retry_for_subifd = s->sub_ifd && s->get_subimage;
-    /** whether we should look for this multi-page IFD's next page */
+    if (s->get_thumbnail && !s->is_thumbnail) {
+        av_log(avctx, AV_LOG_INFO, "No embedded thumbnail present\n");
+        return AVERROR_EOF;
+    }
+
+    /** whether we should process this IFD's SubIFD */
+    retry_for_subifd = s->sub_ifd && (s->get_subimage || (!s->get_thumbnail && s->is_thumbnail));
+    /** whether we should process this multi-page IFD's next page */
     retry_for_page = s->get_page && s->cur_page + 1 < s->get_page;  // get_page is 1-indexed
 
+    last_off = off;
     if (retry_for_page) {
         // set offset to the next IFD
         off = ff_tget_long(&s->gb, le);
@@ -1422,6 +1472,14 @@ again:
     }
 
     if (retry_for_subifd || retry_for_page) {
+        if (!off) {
+            av_log(avctx, AV_LOG_ERROR, "Requested entry not found\n");
+            return AVERROR_INVALIDDATA;
+        }
+        if (off <= last_off) {
+            avpriv_request_sample(s->avctx, "non increasing IFD offset\n");
+            return AVERROR_INVALIDDATA;
+        }
         if (off >= UINT_MAX - 14 || avpkt->size < off + 14) {
             av_log(avctx, AV_LOG_ERROR, "IFD offset is greater than image size\n");
             return AVERROR_INVALIDDATA;
@@ -1670,6 +1728,7 @@ static av_cold int tiff_end(AVCodecContext *avctx)
 #define OFFSET(x) offsetof(TiffContext, x)
 static const AVOption tiff_options[] = {
     { "subimage", "decode subimage instead if available", OFFSET(get_subimage), AV_OPT_TYPE_BOOL, {.i64=0},  0, 1, AV_OPT_FLAG_DECODING_PARAM | AV_OPT_FLAG_VIDEO_PARAM },
+    { "thumbnail", "decode embedded thumbnail subimage instead if available", OFFSET(get_thumbnail), AV_OPT_TYPE_BOOL, {.i64=0},  0, 1, AV_OPT_FLAG_DECODING_PARAM | AV_OPT_FLAG_VIDEO_PARAM },
     { "page", "page number of multi-page image to decode (starting from 1)", OFFSET(get_page), AV_OPT_TYPE_INT, {.i64=0}, 0, UINT16_MAX, AV_OPT_FLAG_DECODING_PARAM | AV_OPT_FLAG_VIDEO_PARAM },
     { NULL },
 };

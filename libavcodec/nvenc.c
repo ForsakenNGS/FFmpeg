@@ -122,7 +122,15 @@ static int nvenc_print_error(void *log_ctx, NVENCSTATUS err,
 
 static void nvenc_print_driver_requirement(AVCodecContext *avctx, int level)
 {
-#if NVENCAPI_CHECK_VERSION(9, 0)
+#if NVENCAPI_CHECK_VERSION(9, 2)
+    const char *minver = "(unknown)";
+#elif NVENCAPI_CHECK_VERSION(9, 1)
+# if defined(_WIN32) || defined(__CYGWIN__)
+    const char *minver = "436.15";
+# else
+    const char *minver = "435.21";
+# endif
+#elif NVENCAPI_CHECK_VERSION(9, 0)
 # if defined(_WIN32) || defined(__CYGWIN__)
     const char *minver = "418.81";
 # else
@@ -904,12 +912,17 @@ static av_cold void nvenc_setup_rate_control(AVCodecContext *avctx)
     if (ctx->zerolatency)
         ctx->encode_config.rcParams.zeroReorderDelay = 1;
 
-    if (ctx->quality)
-    {
+    if (ctx->quality) {
         //convert from float to fixed point 8.8
         int tmp_quality = (int)(ctx->quality * 256.0f);
         ctx->encode_config.rcParams.targetQuality = (uint8_t)(tmp_quality >> 8);
         ctx->encode_config.rcParams.targetQualityLSB = (uint8_t)(tmp_quality & 0xff);
+
+        av_log(avctx, AV_LOG_VERBOSE, "CQ(%d) mode enabled.\n", tmp_quality);
+
+        //CQ mode shall discard avg bitrate & honor max bitrate;
+        ctx->encode_config.rcParams.averageBitRate = avctx->bit_rate = 0;
+        ctx->encode_config.rcParams.maxBitRate = avctx->rc_max_rate;
     }
 }
 
@@ -1156,8 +1169,13 @@ static av_cold int nvenc_setup_encoder(AVCodecContext *avctx)
     ctx->init_encode_params.darHeight = dh;
     ctx->init_encode_params.darWidth = dw;
 
-    ctx->init_encode_params.frameRateNum = avctx->time_base.den;
-    ctx->init_encode_params.frameRateDen = avctx->time_base.num * avctx->ticks_per_frame;
+    if (avctx->framerate.num > 0 && avctx->framerate.den > 0) {
+        ctx->init_encode_params.frameRateNum = avctx->framerate.num;
+        ctx->init_encode_params.frameRateDen = avctx->framerate.den;
+    } else {
+        ctx->init_encode_params.frameRateNum = avctx->time_base.den;
+        ctx->init_encode_params.frameRateDen = avctx->time_base.num * avctx->ticks_per_frame;
+    }
 
     ctx->init_encode_params.enableEncodeAsync = 0;
     ctx->init_encode_params.enablePTD = 1;
@@ -1560,19 +1578,23 @@ static int nvenc_find_free_reg_resource(AVCodecContext *avctx)
     NV_ENCODE_API_FUNCTION_LIST *p_nvenc = &dl_fn->nvenc_funcs;
     NVENCSTATUS nv_status;
 
-    int i;
+    int i, first_round;
 
     if (ctx->nb_registered_frames == FF_ARRAY_ELEMS(ctx->registered_frames)) {
-        for (i = 0; i < ctx->nb_registered_frames; i++) {
-            if (!ctx->registered_frames[i].mapped) {
-                if (ctx->registered_frames[i].regptr) {
-                    nv_status = p_nvenc->nvEncUnregisterResource(ctx->nvencoder, ctx->registered_frames[i].regptr);
-                    if (nv_status != NV_ENC_SUCCESS)
-                        return nvenc_print_error(avctx, nv_status, "Failed unregistering unused input resource");
-                    ctx->registered_frames[i].ptr = NULL;
-                    ctx->registered_frames[i].regptr = NULL;
+        for (first_round = 1; first_round >= 0; first_round--) {
+            for (i = 0; i < ctx->nb_registered_frames; i++) {
+                if (!ctx->registered_frames[i].mapped) {
+                    if (ctx->registered_frames[i].regptr) {
+                        if (first_round)
+                            continue;
+                        nv_status = p_nvenc->nvEncUnregisterResource(ctx->nvencoder, ctx->registered_frames[i].regptr);
+                        if (nv_status != NV_ENC_SUCCESS)
+                            return nvenc_print_error(avctx, nv_status, "Failed unregistering unused input resource");
+                        ctx->registered_frames[i].ptr = NULL;
+                        ctx->registered_frames[i].regptr = NULL;
+                    }
+                    return i;
                 }
-                return i;
             }
         }
     } else {
@@ -1771,10 +1793,11 @@ static int nvenc_set_timestamp(AVCodecContext *avctx,
         pkt->dts = ts0 - delta;
 
         ctx->first_packet_output = 1;
-        return 0;
+    } else {
+        pkt->dts = timestamp_queue_dequeue(ctx->timestamp_list);
     }
 
-    pkt->dts = timestamp_queue_dequeue(ctx->timestamp_list);
+    pkt->dts -= avctx->max_b_frames;
 
     return 0;
 }
@@ -1824,7 +1847,11 @@ static int process_output_surface(AVCodecContext *avctx, AVPacket *pkt, NvencSur
         goto error;
     }
 
-    if (res = ff_alloc_packet2(avctx, pkt, lock_params.bitstreamSizeInBytes,0)) {
+    res = pkt->data ?
+        ff_alloc_packet2(avctx, pkt, lock_params.bitstreamSizeInBytes, lock_params.bitstreamSizeInBytes) :
+        av_new_packet(pkt, lock_params.bitstreamSizeInBytes);
+
+    if (res < 0) {
         p_nvenc->nvEncUnlockBitstream(ctx->nvencoder, tmpoutsurf->output_surface);
         goto error;
     }
@@ -1846,13 +1873,6 @@ static int process_output_surface(AVCodecContext *avctx, AVPacket *pkt, NvencSur
                 res = nvenc_print_error(avctx, nv_status, "Failed unmapping input resource");
                 goto error;
             }
-            nv_status = p_nvenc->nvEncUnregisterResource(ctx->nvencoder, ctx->registered_frames[tmpoutsurf->reg_idx].regptr);
-            if (nv_status != NV_ENC_SUCCESS) {
-                res = nvenc_print_error(avctx, nv_status, "Failed unregistering input resource");
-                goto error;
-            }
-            ctx->registered_frames[tmpoutsurf->reg_idx].ptr = NULL;
-            ctx->registered_frames[tmpoutsurf->reg_idx].regptr = NULL;
         } else if (ctx->registered_frames[tmpoutsurf->reg_idx].mapped < 0) {
             res = AVERROR_BUG;
             goto error;

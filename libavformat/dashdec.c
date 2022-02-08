@@ -1251,6 +1251,34 @@ static int parse_programinformation(AVFormatContext *s, xmlNodePtr node)
     return 0;
 }
 
+static int parse_programinformation(AVFormatContext *s, xmlNodePtr node)
+{
+    xmlChar *val = NULL;
+
+    node = xmlFirstElementChild(node);
+    while (node) {
+        if (!av_strcasecmp(node->name, "Title")) {
+            val = xmlNodeGetContent(node);
+            if (val) {
+                av_dict_set(&s->metadata, "Title", val, 0);
+            }
+        } else if (!av_strcasecmp(node->name, "Source")) {
+            val = xmlNodeGetContent(node);
+            if (val) {
+                av_dict_set(&s->metadata, "Source", val, 0);
+            }
+        } else if (!av_strcasecmp(node->name, "Copyright")) {
+            val = xmlNodeGetContent(node);
+            if (val) {
+                av_dict_set(&s->metadata, "Copyright", val, 0);
+            }
+        }
+        node = xmlNextElementSibling(node);
+        xmlFree(val);
+    }
+    return 0;
+}
+
 static int parse_manifest(AVFormatContext *s, const char *url, AVIOContext *in)
 {
     DASHContext *c = s->priv_data;
@@ -1834,9 +1862,30 @@ static int read_data(void *opaque, uint8_t *buf, int buf_size)
     DASHContext *c = v->parent->priv_data;
 
 restart:
-    /* load/update Media Initialization Section, if any */
-    if ((ret = update_init_section(v)) < 0)
-        goto end;
+    if (!v->input) {
+        free_fragment(&v->cur_seg);
+        v->cur_seg = get_current_fragment(v);
+        if (!v->cur_seg) {
+            ret = AVERROR_EOF;
+            goto end;
+        }
+
+        /* load/update Media Initialization Section, if any */
+        ret = update_init_section(v);
+        if (ret)
+            goto end;
+
+        ret = open_input(c, v, v->cur_seg);
+        if (ret < 0) {
+            if (ff_check_interrupt(c->interrupt_callback)) {
+                ret = AVERROR_EXIT;
+                goto end;
+            }
+            av_log(v->parent, AV_LOG_WARNING, "Failed to open fragment of playlist %d\n", v->rep_idx);
+            v->cur_seq_no++;
+            goto restart;
+        }
+    }
 
     if (v->init_sec_buf_read_offset < v->init_sec_data_len) {
         /* Push init section out first before first actual fragment */
@@ -2216,6 +2265,7 @@ static int open_demux_for_component(AVFormatContext *s, struct representation *p
         }
         st->id = 0;
         avcodec_parameters_copy(st->codecpar, params);
+        avpriv_set_pts_info(st, ist->pts_wrap_bits, ist->time_base.num, ist->time_base.den);
     } else {
         AVStream *st;
         ret = reopen_demux_for_component(s, pls);

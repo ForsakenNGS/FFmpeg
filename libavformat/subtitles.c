@@ -132,9 +132,10 @@ AVPacket *ff_subtitles_queue_insert(FFDemuxSubtitlesQueue *q,
         if (!subs)
             return NULL;
         q->subs = subs;
-        sub = &subs[q->nb_subs++];
+        sub = &subs[q->nb_subs];
         if (av_new_packet(sub, len) < 0)
             return NULL;
+        q->nb_subs++;
         sub->flags |= AV_PKT_FLAG_KEY;
         sub->pts = sub->dts = 0;
         memcpy(sub->data, event, len);
@@ -193,6 +194,9 @@ static void drop_dups(void *log_ctx, FFDemuxSubtitlesQueue *q)
 void ff_subtitles_queue_finalize(void *log_ctx, FFDemuxSubtitlesQueue *q)
 {
     int i;
+
+    if (!q->nb_subs)
+        return;
 
     qsort(q->subs, q->nb_subs, sizeof(*q->subs),
           q->sort == SUB_SORT_TS_POS ? cmp_pkt_sub_ts_pos
@@ -417,7 +421,7 @@ ptrdiff_t ff_subtitles_read_line(FFTextReader *tr, char *buf, size_t size)
         buf[cur++] = c;
         buf[cur] = '\0';
     }
-    if (ff_text_peek_r8(tr) == '\r')
+    while (ff_text_peek_r8(tr) == '\r')
         ff_text_r8(tr);
     if (ff_text_peek_r8(tr) == '\n')
         ff_text_r8(tr);

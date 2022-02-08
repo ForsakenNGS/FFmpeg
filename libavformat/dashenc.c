@@ -35,6 +35,7 @@
 #include "libavutil/time.h"
 #include "libavutil/time_internal.h"
 
+#include "av1.h"
 #include "avc.h"
 #include "avformat.h"
 #include "avio_internal.h"
@@ -89,6 +90,7 @@ typedef struct OutputStream {
     int bit_rate;
     SegmentType segment_type;  /* segment type selected for this particular stream */
     const char *format_name;
+    const char *extension_name;
     const char *single_file_name;  /* file names selected for this particular stream */
     const char *init_seg_name;
     const char *media_seg_name;
@@ -224,6 +226,16 @@ static const char *get_format_str(SegmentType segment_type) {
     return NULL;
 }
 
+static const char *get_extension_str(SegmentType type, int single_file)
+{
+    switch (type) {
+
+    case SEGMENT_TYPE_MP4:  return single_file ? "mp4" : "m4s";
+    case SEGMENT_TYPE_WEBM: return "webm";
+    default: return NULL;
+    }
+}
+
 static int handle_io_open_error(AVFormatContext *s, int err, char *url) {
     DASHContext *c = s->priv_data;
     char errbuf[AV_ERROR_MAX_STRING_SIZE];
@@ -261,6 +273,12 @@ static int init_segment_types(AVFormatContext *s)
             av_log(s, AV_LOG_ERROR, "Could not select DASH segment type for stream %d\n", i);
             return AVERROR_MUXER_NOT_FOUND;
         }
+        os->extension_name = get_extension_str(segment_type, c->single_file);
+        if (!os->extension_name) {
+            av_log(s, AV_LOG_ERROR, "Could not get extension type for stream %d\n", i);
+            return AVERROR_MUXER_NOT_FOUND;
+        }
+
         has_mp4_streams |= segment_type == SEGMENT_TYPE_MP4;
     }
 
@@ -382,6 +400,21 @@ static void set_codec_str(AVFormatContext *s, AVCodecParameters *par,
             av_strlcatf(str, size, ".%02x%02x%02x",
                         extradata[1], extradata[2], extradata[3]);
         av_free(tmpbuf);
+    } else if (!strcmp(str, "av01")) {
+        AV1SequenceParameters seq;
+        if (!par->extradata_size)
+            return;
+        if (ff_av1_parse_seq_header(&seq, par->extradata, par->extradata_size) < 0)
+            return;
+
+        av_strlcatf(str, size, ".%01u.%02u%s.%02u",
+                    seq.profile, seq.level, seq.tier ? "H" : "M", seq.bitdepth);
+        if (seq.color_description_present_flag)
+            av_strlcatf(str, size, ".%01u.%01u%01u%01u.%02u.%02u.%02u.%01u",
+                        seq.monochrome,
+                        seq.chroma_subsampling_x, seq.chroma_subsampling_y, seq.chroma_sample_position,
+                        seq.color_primaries, seq.transfer_characteristics, seq.matrix_coefficients,
+                        seq.color_range);
     }
 }
 
@@ -485,7 +518,7 @@ static void write_hls_media_playlist(OutputStream *os, AVFormatContext *s,
     }
 
     ff_hls_write_playlist_header(c->m3u8_out, 6, -1, target_duration,
-                                 start_number, PLAYLIST_TYPE_NONE);
+                                 start_number, PLAYLIST_TYPE_NONE, 0);
 
     ff_hls_write_init_file(c->m3u8_out, os->initfile, c->single_file,
                            os->init_range_length, os->init_start_pos);
@@ -505,7 +538,7 @@ static void write_hls_media_playlist(OutputStream *os, AVFormatContext *s,
                                 (double) seg->duration / timescale, 0,
                                 seg->range_length, seg->start_pos, NULL,
                                 c->single_file ? os->initfile : seg->file,
-                                &prog_date_time);
+                                &prog_date_time, 0, 0, 0);
         if (ret < 0) {
             av_log(os->ctx, AV_LOG_WARNING, "ff_hls_write_file_entry get error\n");
         }
@@ -1189,22 +1222,18 @@ static int dash_init(AVFormatContext *s)
         dict_copy_entry(&as->metadata, s->streams[i]->metadata, "language");
         dict_copy_entry(&as->metadata, s->streams[i]->metadata, "role");
 
-        ctx = avformat_alloc_context();
-        if (!ctx)
-            return AVERROR(ENOMEM);
-
         if (c->init_seg_name) {
-            os->init_seg_name = av_strireplace(c->init_seg_name, "$ext$", os->format_name);
+            os->init_seg_name = av_strireplace(c->init_seg_name, "$ext$", os->extension_name);
             if (!os->init_seg_name)
                 return AVERROR(ENOMEM);
         }
         if (c->media_seg_name) {
-            os->media_seg_name = av_strireplace(c->media_seg_name, "$ext$", os->format_name);
+            os->media_seg_name = av_strireplace(c->media_seg_name, "$ext$", os->extension_name);
             if (!os->media_seg_name)
                 return AVERROR(ENOMEM);
         }
         if (c->single_file_name) {
-            os->single_file_name = av_strireplace(c->single_file_name, "$ext$", os->format_name);
+            os->single_file_name = av_strireplace(c->single_file_name, "$ext$", os->extension_name);
             if (!os->single_file_name)
                 return AVERROR(ENOMEM);
         }
@@ -1225,10 +1254,13 @@ static int dash_init(AVFormatContext *s)
             }
         }
 
+        os->ctx = ctx = avformat_alloc_context();
+        if (!ctx)
+            return AVERROR(ENOMEM);
+
         ctx->oformat = av_guess_format(os->format_name, NULL, NULL);
         if (!ctx->oformat)
             return AVERROR_MUXER_NOT_FOUND;
-        os->ctx = ctx;
         ctx->interrupt_callback    = s->interrupt_callback;
         ctx->opaque                = s->opaque;
         ctx->io_close              = s->io_close;
@@ -1448,23 +1480,24 @@ static void find_index_range(AVFormatContext *s, const char *full_path,
 }
 
 static int update_stream_extradata(AVFormatContext *s, OutputStream *os,
-                                   AVCodecParameters *par,
-                                   AVRational *frame_rate)
+                                   AVPacket *pkt, AVRational *frame_rate)
 {
+    AVCodecParameters *par = os->ctx->streams[0]->codecpar;
     uint8_t *extradata;
+    int ret, extradata_size;
 
-    if (os->ctx->streams[0]->codecpar->extradata_size || !par->extradata_size)
+    if (par->extradata_size)
         return 0;
 
-    extradata = av_malloc(par->extradata_size);
+    extradata = av_packet_get_side_data(pkt, AV_PKT_DATA_NEW_EXTRADATA, &extradata_size);
+    if (!extradata_size)
+        return 0;
 
-    if (!extradata)
-        return AVERROR(ENOMEM);
+    ret = ff_alloc_extradata(par, extradata_size);
+    if (ret < 0)
+        return ret;
 
-    memcpy(extradata, par->extradata, par->extradata_size);
-
-    os->ctx->streams[0]->codecpar->extradata = extradata;
-    os->ctx->streams[0]->codecpar->extradata_size = par->extradata_size;
+    memcpy(par->extradata, extradata, extradata_size);
 
     set_codec_str(s, par, frame_rate, os->codec_str, sizeof(os->codec_str));
 
@@ -1643,11 +1676,11 @@ static int dash_flush(AVFormatContext *s, int final, int stream)
         for (i = 0; i < s->nb_streams; i++) {
             OutputStream *os = &c->streams[i];
             if (os->ctx && os->ctx_inited) {
-                int file_size = avio_tell(os->ctx->pb);
+                int64_t file_size = avio_tell(os->ctx->pb);
                 av_write_trailer(os->ctx);
                 if (c->global_sidx) {
                     int j, start_index, start_number;
-                    int sidx_size = avio_tell(os->ctx->pb) - file_size;
+                    int64_t sidx_size = avio_tell(os->ctx->pb) - file_size;
                     get_start_index_number(os, c, &start_index, &start_number);
                     if (start_index >= os->nb_segments ||
                         os->segment_type != SEGMENT_TYPE_MP4)
@@ -1683,7 +1716,7 @@ static int dash_write_packet(AVFormatContext *s, AVPacket *pkt)
     int64_t seg_end_duration, elapsed_duration;
     int ret;
 
-    ret = update_stream_extradata(s, os, st->codecpar, &st->avg_frame_rate);
+    ret = update_stream_extradata(s, os, pkt, &st->avg_frame_rate);
     if (ret < 0)
         return ret;
 

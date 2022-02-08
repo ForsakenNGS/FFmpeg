@@ -935,7 +935,6 @@ FF_ENABLE_DEPRECATION_WARNINGS
                                                 cx_frame->sz_alpha + 8);
             if(!side_data) {
                 av_packet_unref(pkt);
-                av_free(pkt);
                 return AVERROR(ENOMEM);
             }
             AV_WB64(side_data, 1);
@@ -978,7 +977,7 @@ static int queue_frames(AVCodecContext *avctx, AVPacket *pkt_out)
        are only good through the next vpx_codec call */
     while ((pkt = vpx_codec_get_cx_data(&ctx->encoder, &iter)) &&
            (!ctx->is_alpha ||
-            (ctx->is_alpha && (pkt_alpha = vpx_codec_get_cx_data(&ctx->encoder_alpha, &iter_alpha))))) {
+            (pkt_alpha = vpx_codec_get_cx_data(&ctx->encoder_alpha, &iter_alpha)))) {
         switch (pkt->kind) {
         case VPX_CODEC_CX_FRAME_PKT:
             if (!size) {
