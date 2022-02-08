@@ -216,6 +216,13 @@ typedef struct MatroskaTrackOperation {
     EbmlList combine_planes;
 } MatroskaTrackOperation;
 
+typedef struct MatroskaBlockAdditionMapping {
+    int value;
+    char *name;
+    int type;
+    EbmlBin extradata;
+} MatroskaBlockAdditionMapping;
+
 typedef struct MatroskaTrack {
     uint64_t num;
     uint64_t uid;
@@ -240,6 +247,7 @@ typedef struct MatroskaTrack {
     int64_t end_timecode;
     int ms_compat;
     uint64_t max_block_additional_id;
+    EbmlList block_addition_mappings;
 
     uint32_t palette[AVPALETTE_COUNT];
     int has_palette;
@@ -369,6 +377,9 @@ typedef struct MatroskaDemuxContext {
 
     /* Bandwidth value for WebM DASH Manifest */
     int bandwidth;
+
+    /* Skip parsing tags in trailers */
+    int skip_trailer_tags;
 } MatroskaDemuxContext;
 
 typedef struct MatroskaBlock {
@@ -525,6 +536,14 @@ static const EbmlSyntax matroska_track_operation[] = {
     { 0 }
 };
 
+static EbmlSyntax matroska_block_addition_mapping[] = {
+    { MATROSKA_ID_BLKADDIDVALUE,      EBML_UINT, 0, offsetof(MatroskaBlockAdditionMapping, value) },
+    { MATROSKA_ID_BLKADDIDNAME,       EBML_STR,  0, offsetof(MatroskaBlockAdditionMapping, name) },
+    { MATROSKA_ID_BLKADDIDTYPE,       EBML_UINT, 0, offsetof(MatroskaBlockAdditionMapping, type) },
+    { MATROSKA_ID_BLKADDIDEXTRADATA,  EBML_BIN,  0, offsetof(MatroskaBlockAdditionMapping, extradata) },
+    { 0 }
+};
+
 static const EbmlSyntax matroska_track[] = {
     { MATROSKA_ID_TRACKNUMBER,           EBML_UINT,  0, offsetof(MatroskaTrack, num) },
     { MATROSKA_ID_TRACKNAME,             EBML_UTF8,  0, offsetof(MatroskaTrack, name) },
@@ -543,6 +562,7 @@ static const EbmlSyntax matroska_track[] = {
     { MATROSKA_ID_TRACKOPERATION,        EBML_NEST,  0, offsetof(MatroskaTrack, operation),    { .n = matroska_track_operation } },
     { MATROSKA_ID_TRACKCONTENTENCODINGS, EBML_NEST,  0, 0,                                     { .n = matroska_track_encodings } },
     { MATROSKA_ID_TRACKMAXBLKADDID,      EBML_UINT,  0, offsetof(MatroskaTrack, max_block_additional_id) },
+    { MATROSKA_ID_TRACKBLKADDMAPPING,    EBML_NEST,  sizeof(MatroskaBlockAdditionMapping), offsetof(MatroskaTrack, block_addition_mappings), { .n = matroska_block_addition_mapping } },
     { MATROSKA_ID_SEEKPREROLL,           EBML_UINT,  0, offsetof(MatroskaTrack, seek_preroll) },
     { MATROSKA_ID_TRACKFLAGENABLED,      EBML_NONE },
     { MATROSKA_ID_TRACKFLAGLACING,       EBML_NONE },
@@ -791,7 +811,7 @@ static int matroska_resync(MatroskaDemuxContext *matroska, int64_t last_pos)
     }
 
     matroska->done = 1;
-    return AVERROR_EOF;
+    return pb->error ? pb->error : AVERROR_EOF;
 }
 
 /*
@@ -838,7 +858,7 @@ static int ebml_read_num(MatroskaDemuxContext *matroska, AVIOContext *pb,
                    pos, pos);
             return pb->error ? pb->error : AVERROR(EIO);
         }
-        return AVERROR_EOF;
+        return pb->error ? pb->error : AVERROR_EOF;
     }
 
     /* get the length of the EBML number */
@@ -1209,7 +1229,7 @@ static int ebml_parse_elem(MatroskaDemuxContext *matroska,
                 uint64_t elem_end = pos + length,
                         level_end = level->start + level->length;
 
-                if (level_end < elem_end) {
+                if (level_end < elem_end && syntax->type != EBML_NONE) {
                     av_log(matroska->ctx, AV_LOG_ERROR,
                            "Element at 0x%"PRIx64" ending at 0x%"PRIx64" exceeds "
                            "containing master element ending at 0x%"PRIx64"\n",
@@ -1677,6 +1697,10 @@ static void matroska_execute_seekhead(MatroskaDemuxContext *matroska)
         if (id == MATROSKA_ID_CUES)
             continue;
 
+        // don't seek for metadata if we don't care
+        if (id == MATROSKA_ID_TAGS && matroska->skip_trailer_tags)
+            continue;
+
         if (matroska_parse_seekhead_entry(matroska, pos) < 0) {
             // mark index as broken
             matroska->cues_parsing_deferred = -1;
@@ -2066,6 +2090,39 @@ static int mkv_parse_video_projection(AVStream *st, const MatroskaTrack *track) 
     return 0;
 }
 
+static int mkv_parse_dvcc_dvvc(AVStream *st, const MatroskaTrack *track,
+                               EbmlBin *bin, void *logctx)
+{
+    GetBitContext gb;
+    init_get_bits8(&gb, bin->data, bin->size);
+    return ff_mov_parse_dvcc_dvvc(st, &gb, logctx);
+}
+
+static int mkv_parse_block_addition_mappings(AVStream *st, const MatroskaTrack *track,
+                                             void *logctx)
+{
+    int i, ret;
+    const EbmlList *mappings_list = &track->block_addition_mappings;
+    MatroskaBlockAdditionMapping *mappings = mappings_list->elem;
+
+    for (i = 0; i < mappings_list->nb_elem; i++) {
+        MatroskaBlockAdditionMapping *mapping = &mappings[i];
+        switch (mapping->type) {
+        case MKBETAG('d','v','c','C'):
+        case MKBETAG('d','v','v','C'):
+            if ((ret = mkv_parse_dvcc_dvvc(st, track, &mapping->extradata, logctx)) < 0)
+                return ret;
+            break;
+        default:
+            av_log(logctx, AV_LOG_DEBUG,
+                   "Unknown block additional mapping type %i, value %i, name \"%s\"\n",
+                   mapping->type, mapping->value, mapping->name ? mapping->name : "");
+        }
+    }
+
+    return 0;
+}
+
 static int get_qt_codec(MatroskaTrack *track, uint32_t *fourcc, enum AVCodecID *codec_id)
 {
     const AVCodecTag *codec_tags;
@@ -2239,6 +2296,14 @@ static int matroska_parse_tracks(AVFormatContext *s)
             av_dict_set(&st->metadata, "enc_key_id", key_id_base64, 0);
             av_freep(&key_id_base64);
         }
+
+        //PLEX
+        if (encodings_list->nb_elem == 1) {
+            av_dict_set_int(&st->metadata, "encoding_type", encodings[0].type, 0);
+            if (encodings[0].type == 0)
+              av_dict_set_int(&st->metadata, "compression_algo", encodings[0].compression.algo, 0);
+        }
+        //PLEX
 
         if (!strcmp(track->codec_id, "V_MS/VFW/FOURCC") &&
              track->codec_priv.size >= 40               &&
@@ -2613,6 +2678,10 @@ static int matroska_parse_tracks(AVFormatContext *s)
             if (st->codecpar->codec_id == AV_CODEC_ID_ASS)
                 matroska->contains_ssa = 1;
         }
+
+        ret = mkv_parse_block_addition_mappings(st, track, matroska->ctx);
+        if (ret < 0)
+            return ret;
     }
 
     return 0;
@@ -3599,9 +3668,17 @@ static int matroska_read_seek(AVFormatContext *s, int stream_index,
                   SEEK_SET);
         matroska->current_id = 0;
         while ((index = av_index_search_timestamp(st, timestamp, flags)) < 0 || index == st->nb_index_entries - 1) {
+            int ret;
+            int64_t pos = avio_tell(matroska->ctx->pb);
             matroska_clear_queue(matroska);
-            if (matroska_parse_cluster(matroska) < 0)
-                break;
+            if ((ret = matroska_parse_cluster(matroska)) < 0) {
+                if (ret == AVERROR_EOF) {
+                    break;
+                } else if(matroska_resync(matroska, pos) < 0) {
+                    index = -1;
+                    break;
+                }
+            }
         }
     }
 
@@ -3633,6 +3710,7 @@ static int matroska_read_seek(AVFormatContext *s, int stream_index,
     ff_update_cur_dts(s, st, st->index_entries[index].timestamp);
     return 0;
 err:
+    av_log(s, st->nb_index_entries ? AV_LOG_WARNING : AV_LOG_VERBOSE, "Failed to seek using index; falling back to generic seek\n");
     // slightly hackish but allows proper fallback to
     // the generic seeking code.
     matroska_clear_queue(matroska);
@@ -4042,17 +4120,33 @@ static int webm_dash_manifest_read_packet(AVFormatContext *s, AVPacket *pkt)
     return AVERROR_EOF;
 }
 
+#define COMMON_OPTS \
+    { "skip_trailer_tags", "skip parsing metadata at the end of the file.", OFFSET(skip_trailer_tags), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM }, \
+
 #define OFFSET(x) offsetof(MatroskaDemuxContext, x)
-static const AVOption options[] = {
+static const AVOption matroskadec_options[] = {
+    COMMON_OPTS
+    { NULL },
+};
+
+static const AVOption webm_dash_options[] = {
     { "live", "flag indicating that the input is a live file that only has the headers.", OFFSET(is_live), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
     { "bandwidth", "bandwidth of this stream to be specified in the DASH manifest.", OFFSET(bandwidth), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
+    COMMON_OPTS
     { NULL },
+};
+
+static const AVClass matroskadec_class = {
+    .class_name = "Matroska demuxer",
+    .item_name  = av_default_item_name,
+    .option     = matroskadec_options,
+    .version    = LIBAVUTIL_VERSION_INT,
 };
 
 static const AVClass webm_dash_class = {
     .class_name = "WebM DASH Manifest demuxer",
     .item_name  = av_default_item_name,
-    .option     = options,
+    .option     = webm_dash_options,
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
@@ -4066,6 +4160,7 @@ AVInputFormat ff_matroska_demuxer = {
     .read_packet    = matroska_read_packet,
     .read_close     = matroska_read_close,
     .read_seek      = matroska_read_seek,
+    .priv_class     = &matroskadec_class,
     .mime_type      = "audio/webm,audio/x-matroska,video/webm,video/x-matroska"
 };
 

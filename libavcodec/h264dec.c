@@ -962,6 +962,8 @@ static int h264_decode_frame(AVCodecContext *avctx, void *data,
     AVFrame *pict      = data;
     int buf_index;
     int ret;
+    const uint8_t *new_extra;
+    int new_extra_size;
 
     h->flags = avctx->flags;
     h->setup_finished = 0;
@@ -973,13 +975,10 @@ static int h264_decode_frame(AVCodecContext *avctx, void *data,
     if (buf_size == 0)
         return send_next_delayed_frame(h, pict, got_frame, 0);
 
-    if (h->is_avc && av_packet_get_side_data(avpkt, AV_PKT_DATA_NEW_EXTRADATA, NULL)) {
-        int side_size;
-        uint8_t *side = av_packet_get_side_data(avpkt, AV_PKT_DATA_NEW_EXTRADATA, &side_size);
-        if (is_extra(side, side_size))
-            ff_h264_decode_extradata(side, side_size,
-                                     &h->ps, &h->is_avc, &h->nal_length_size,
-                                     avctx->err_recognition, avctx);
+    if ((new_extra = av_packet_get_side_data(avpkt, AV_PKT_DATA_NEW_EXTRADATA, &new_extra_size))) {
+        ff_h264_decode_extradata(new_extra, new_extra_size,
+                                 &h->ps, &h->is_avc, &h->nal_length_size,
+                                 avctx->err_recognition, avctx);
     }
     if (h->is_avc && buf_size >= 9 && buf[0]==1 && buf[2]==0 && (buf[4]&0xFC)==0xFC) {
         if (is_extra(buf, buf_size))

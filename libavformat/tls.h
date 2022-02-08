@@ -51,6 +51,21 @@ typedef struct TLSShared {
     {"listen",     "Listen for incoming connections",     offsetof(pstruct, options_field . listen),    AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, .flags = TLS_OPTFL }, \
     {"verifyhost", "Verify against a specific hostname",  offsetof(pstruct, options_field . host),      AV_OPT_TYPE_STRING, .flags = TLS_OPTFL }
 
+#define TLS_CLASS(pstruct, options_field) \
+static void *tls_child_next(void *obj, void *prev) \
+{ \
+    pstruct *s = obj; \
+    return prev ? NULL : s->options_field.tcp; \
+} \
+static const AVClass tls_class = { \
+    .class_name = "tls", \
+    .item_name  = av_default_item_name, \
+    .option     = options, \
+    .version    = LIBAVUTIL_VERSION_INT, \
+    .child_next = tls_child_next, \
+}; \
+
+
 int ff_tls_open_underlying(TLSShared *c, URLContext *parent, const char *uri, AVDictionary **options);
 
 void ff_gnutls_init(void);

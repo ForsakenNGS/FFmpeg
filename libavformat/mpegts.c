@@ -28,6 +28,7 @@
 #include "libavutil/mathematics.h"
 #include "libavutil/opt.h"
 #include "libavutil/avassert.h"
+#include "libavutil/dovi_meta.h"
 #include "libavcodec/bytestream.h"
 #include "libavcodec/get_bits.h"
 #include "libavcodec/opus.h"
@@ -611,7 +612,7 @@ static int get_packet_size(AVFormatContext* s)
     while (buf_size < PROBE_PACKET_MAX_BUF) {
         ret = avio_read_partial(s->pb, buf + buf_size, PROBE_PACKET_MAX_BUF - buf_size);
         if (ret < 0)
-            return AVERROR_INVALIDDATA;
+            return ret;
         buf_size += ret;
 
         score      = analyze(buf, buf_size, TS_PACKET_SIZE,      0);
@@ -955,6 +956,11 @@ static int mpegts_set_stream_info(AVStream *st, PESContext *pes,
         st->codecpar->codec_type = AVMEDIA_TYPE_DATA;
         st->codecpar->codec_id   = AV_CODEC_ID_BIN_DATA;
         st->request_probe = AVPROBE_SCORE_STREAM_RETRY / 5;
+    }
+    if (st->codecpar->codec_id == AV_CODEC_ID_NONE && stream_type == STREAM_TYPE_PRIVATE_SECTION) {
+        // These don't carry any packet data
+        st->codecpar->codec_type = AVMEDIA_TYPE_DATA;
+        st->codecpar->codec_id   = AV_CODEC_ID_BIN_DATA;
     }
 
     /* queue a context update if properties changed */
@@ -2123,6 +2129,53 @@ int ff_parse_mpeg2_descriptor(AVFormatContext *fc, AVStream *st, int stream_type
             st->request_probe        = 0;
         }
         break;
+    case 0xb0: /* DOVI video stream descriptor */
+        {
+            uint32_t buf;
+            AVDOVIDecoderConfigurationRecord *dovi;
+            size_t dovi_size;
+            int ret;
+            if (desc_end - *pp < 4) // (8 + 8 + 7 + 6 + 1 + 1 + 1) / 8
+                return AVERROR_INVALIDDATA;
+
+            dovi = av_dovi_alloc(&dovi_size);
+            if (!dovi)
+                return AVERROR(ENOMEM);
+
+            dovi->dv_version_major = get8(pp, desc_end);
+            dovi->dv_version_minor = get8(pp, desc_end);
+            buf = get16(pp, desc_end);
+            dovi->dv_profile        = (buf >> 9) & 0x7f;    // 7 bits
+            dovi->dv_level          = (buf >> 3) & 0x3f;    // 6 bits
+            dovi->rpu_present_flag  = (buf >> 2) & 0x01;    // 1 bit
+            dovi->el_present_flag   = (buf >> 1) & 0x01;    // 1 bit
+            dovi->bl_present_flag   =  buf       & 0x01;    // 1 bit
+            if (desc_end - *pp >= 20) {  // 4 + 4 * 4
+                buf = get8(pp, desc_end);
+                dovi->dv_bl_signal_compatibility_id = (buf >> 4) & 0x0f; // 4 bits
+            } else {
+                // 0 stands for None
+                // Dolby Vision V1.2.93 profiles and levels
+                dovi->dv_bl_signal_compatibility_id = 0;
+            }
+
+            ret = av_stream_add_side_data(st, AV_PKT_DATA_DOVI_CONF,
+                                          (uint8_t *)dovi, dovi_size);
+            if (ret < 0) {
+                av_freep(dovi);
+                return ret;
+            }
+
+            av_log(fc, AV_LOG_TRACE, "DOVI, version: %d.%d, profile: %d, level: %d, "
+                   "rpu flag: %d, el flag: %d, bl flag: %d, compatibility id: %d\n",
+                   dovi->dv_version_major, dovi->dv_version_minor,
+                   dovi->dv_profile, dovi->dv_level,
+                   dovi->rpu_present_flag,
+                   dovi->el_present_flag,
+                   dovi->bl_present_flag,
+                   dovi->dv_bl_signal_compatibility_id);
+        }
+        break;
     default:
         break;
     }
@@ -2767,6 +2820,8 @@ static int mpegts_resync(AVFormatContext *s, int seekback, const uint8_t *curren
 
     for (i = 0; i < ts->resync_size; i++) {
         c = avio_r8(pb);
+        if (pb->error)
+            return pb->error;
         if (avio_feof(pb))
             return AVERROR_EOF;
         if (c == 0x47) {
@@ -2790,8 +2845,13 @@ static int read_packet(AVFormatContext *s, uint8_t *buf, int raw_packet_size,
 
     for (;;) {
         len = ffio_read_indirect(pb, buf, TS_PACKET_SIZE, data);
-        if (len != TS_PACKET_SIZE)
-            return len < 0 ? len : AVERROR_EOF;
+        if (len != TS_PACKET_SIZE) {
+            if (len < 0)
+                return len;
+            if (pb->error)
+                return pb->error;
+            return AVERROR_EOF;
+        }
         /* check packet sync byte */
         if ((*data)[0] != 0x47) {
             /* find a new packet start */
@@ -2960,6 +3020,8 @@ static int mpegts_read_header(AVFormatContext *s)
     pos = avio_tell(pb);
     ts->raw_packet_size = get_packet_size(s);
     if (ts->raw_packet_size <= 0) {
+        if (ts->raw_packet_size != AVERROR_INVALIDDATA && ts->raw_packet_size != AVERROR_EOF)
+            return ts->raw_packet_size;
         av_log(s, AV_LOG_WARNING, "Could not detect TS packet size, defaulting to non-FEC/DVHS\n");
         ts->raw_packet_size = TS_PACKET_SIZE;
     }
@@ -2976,7 +3038,7 @@ static int mpegts_read_header(AVFormatContext *s)
 
         mpegts_open_section_filter(ts, PAT_PID, pat_cb, ts, 1);
 
-        handle_packets(ts, probesize / ts->raw_packet_size);
+        handle_packets(ts, 100); //PLEX: hardcoded low packet count; relying on find_stream_info
         /* if could not find service, enable auto_guess */
 
         ts->auto_guess = 1;

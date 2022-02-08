@@ -121,6 +121,12 @@ struct AVFormatInternal {
     int avoid_negative_ts_use_pts;
 
     /**
+     * Whether or not a header has already been written
+     */
+    int header_written;
+    int write_header_ret;
+
+    /**
      * Timestamp of the end of the shortest stream.
      */
     int64_t shortest_end;
@@ -190,6 +196,15 @@ struct AVStreamInternal {
      * Whether the internal avctx needs to be updated from codecpar (after a late change to codecpar)
      */
     int need_context_update;
+
+//PLEX
+    int decrypt_inited;
+//PLEX
+
+    /**
+     * The wallclock timestamp of the most recent read packet (if AVFMT_FLAG_FILL_WALLCLOCK_DTS is set)
+     */
+    int64_t cur_wallclock_time;
 
     FFFrac *priv_pts;
 };
@@ -796,5 +811,14 @@ int ff_packet_list_get(AVPacketList **head, AVPacketList **tail,
 void ff_packet_list_free(AVPacketList **head, AVPacketList **tail);
 
 void avpriv_register_devices(const AVOutputFormat * const o[], const AVInputFormat * const i[]);
+
+/**
+ * Copy the side data from one stream to another; useful in chained (de)muxers
+ *
+ * @param dst Stream to copy to
+ * @param src Stream to copy from
+ * @return 0 on success, negative AVERROR value on failure
+ */
+int ff_stream_copy_side_data(AVStream *dst, const AVStream *src);
 
 #endif /* AVFORMAT_INTERNAL_H */

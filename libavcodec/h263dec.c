@@ -614,7 +614,7 @@ retry:
     if ((ret = ff_mpv_frame_start(s, avctx)) < 0)
         return ret;
 
-    if (!s->divx_packed)
+    if (!s->divx_packed && !avctx->hwaccel)
         ff_thread_finish_setup(avctx);
 
     if (avctx->hwaccel) {
@@ -743,6 +743,22 @@ const enum AVPixelFormat ff_h263_hwaccel_pixfmt_list_420[] = {
     AV_PIX_FMT_NONE
 };
 
+const AVCodecHWConfigInternal *ff_h263_hw_config_list[] = {
+#if CONFIG_H263_VAAPI_HWACCEL
+    HWACCEL_VAAPI(h263),
+#endif
+#if CONFIG_MPEG4_NVDEC_HWACCEL
+    HWACCEL_NVDEC(mpeg4),
+#endif
+#if CONFIG_MPEG4_VDPAU_HWACCEL
+    HWACCEL_VDPAU(mpeg4),
+#endif
+#if CONFIG_H263_VIDEOTOOLBOX_HWACCEL
+    HWACCEL_VIDEOTOOLBOX(h263),
+#endif
+    NULL
+};
+
 AVCodec ff_h263_decoder = {
     .name           = "h263",
     .long_name      = NULL_IF_CONFIG_SMALL("H.263 / H.263-1996, H.263+ / H.263-1998 / H.263 version 2"),
@@ -758,6 +774,7 @@ AVCodec ff_h263_decoder = {
     .flush          = ff_mpeg_flush,
     .max_lowres     = 3,
     .pix_fmts       = ff_h263_hwaccel_pixfmt_list_420,
+    .hw_configs     = ff_h263_hw_config_list,
 };
 
 AVCodec ff_h263p_decoder = {
@@ -775,16 +792,5 @@ AVCodec ff_h263p_decoder = {
     .flush          = ff_mpeg_flush,
     .max_lowres     = 3,
     .pix_fmts       = ff_h263_hwaccel_pixfmt_list_420,
-    .hw_configs     = (const AVCodecHWConfigInternal*[]) {
-#if CONFIG_H263_VAAPI_HWACCEL
-                        HWACCEL_VAAPI(h263),
-#endif
-#if CONFIG_MPEG4_VDPAU_HWACCEL
-                        HWACCEL_VDPAU(mpeg4),
-#endif
-#if CONFIG_H263_VIDEOTOOLBOX_HWACCEL
-                        HWACCEL_VIDEOTOOLBOX(h263),
-#endif
-                        NULL
-                    },
+    .hw_configs     = ff_h263_hw_config_list,
 };

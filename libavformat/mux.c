@@ -485,6 +485,25 @@ static void flush_if_needed(AVFormatContext *s)
     }
 }
 
+static int write_header_internal(AVFormatContext *s)
+{
+    if (!(s->oformat->flags & AVFMT_NOFILE) && s->pb)
+        avio_write_marker(s->pb, AV_NOPTS_VALUE, AVIO_DATA_MARKER_HEADER);
+    if (s->oformat->write_header) {
+        int ret = s->oformat->write_header(s);
+        if (ret >= 0 && s->pb && s->pb->error < 0)
+            ret = s->pb->error;
+        s->internal->write_header_ret = ret;
+        if (ret < 0)
+            return ret;
+        flush_if_needed(s);
+    }
+    s->internal->header_written = 1;
+    if (!(s->oformat->flags & AVFMT_NOFILE) && s->pb)
+        avio_write_marker(s->pb, AV_NOPTS_VALUE, AVIO_DATA_MARKER_UNKNOWN);
+    return 0;
+}
+
 int avformat_init_output(AVFormatContext *s, AVDictionary **options)
 {
     int ret = 0;
@@ -515,18 +534,11 @@ int avformat_write_header(AVFormatContext *s, AVDictionary **options)
         if ((ret = avformat_init_output(s, options)) < 0)
             return ret;
 
-    if (!(s->oformat->flags & AVFMT_NOFILE) && s->pb)
-        avio_write_marker(s->pb, AV_NOPTS_VALUE, AVIO_DATA_MARKER_HEADER);
-    if (s->oformat->write_header) {
-        ret = s->oformat->write_header(s);
-        if (ret >= 0 && s->pb && s->pb->error < 0)
-            ret = s->pb->error;
+    if (!(s->oformat->check_bitstream && s->flags & AVFMT_FLAG_AUTO_BSF)) {
+        ret = write_header_internal(s);
         if (ret < 0)
             goto fail;
-        flush_if_needed(s);
     }
-    if (!(s->oformat->flags & AVFMT_NOFILE) && s->pb)
-        avio_write_marker(s->pb, AV_NOPTS_VALUE, AVIO_DATA_MARKER_UNKNOWN);
 
     if (!s->internal->streams_initialized) {
         if ((ret = init_pts(s)) < 0)
@@ -622,7 +634,9 @@ static int compute_muxer_pkt_fields(AVFormatContext *s, AVStream *st, AVPacket *
         av_log(s, AV_LOG_ERROR,
                "Application provided invalid, non monotonically increasing dts to muxer in stream %d: %s >= %s\n",
                st->index, av_ts2str(st->cur_dts), av_ts2str(pkt->dts));
+#if 0 //PLEX
         return AVERROR(EINVAL);
+#endif //PLEX
     }
     if (pkt->dts != AV_NOPTS_VALUE && pkt->pts != AV_NOPTS_VALUE && pkt->pts < pkt->dts) {
         av_log(s, AV_LOG_ERROR,
@@ -738,6 +752,12 @@ static int write_packet(AVFormatContext *s, AVPacket *pkt)
         }
     }
 
+    if (!s->internal->header_written) {
+        ret = s->internal->write_header_ret ? s->internal->write_header_ret : write_header_internal(s);
+        if (ret < 0)
+            goto fail;
+    }
+
     if ((pkt->flags & AV_PKT_FLAG_UNCODED_FRAME)) {
         AVFrame *frame = (AVFrame *)pkt->data;
         av_assert0(pkt->size == UNCODED_FRAME_PACKET_SIZE);
@@ -752,6 +772,8 @@ static int write_packet(AVFormatContext *s, AVPacket *pkt)
         if (s->pb->error < 0)
             ret = s->pb->error;
     }
+
+fail:
 
     if (ret < 0) {
         pkt->pts = pts_backup;
@@ -832,12 +854,27 @@ static int prepare_input_packet(AVFormatContext *s, AVPacket *pkt)
     return 0;
 }
 
+static int do_new_extradata_copy(AVCodecParameters *par, AVPacket *pkt) {
+    int side_size;
+    uint8_t *side = av_packet_get_side_data(pkt, AV_PKT_DATA_NEW_EXTRADATA, &side_size);
+    if (side) {
+        uint8_t *new_extra = av_mallocz(side_size + AV_INPUT_BUFFER_PADDING_SIZE);
+        if (!new_extra)
+            return AVERROR(ENOMEM);
+        memcpy(new_extra, side, side_size);
+        av_free(par->extradata);
+        par->extradata = new_extra;
+        par->extradata_size = side_size;
+    }
+    return 1;
+}
+
 static int do_packet_auto_bsf(AVFormatContext *s, AVPacket *pkt) {
     AVStream *st = s->streams[pkt->stream_index];
     int i, ret;
 
     if (!(s->flags & AVFMT_FLAG_AUTO_BSF))
-        return 1;
+        return do_new_extradata_copy(st->codecpar, pkt);
 
     if (s->oformat->check_bitstream) {
         if (!st->internal->bitstream_checked) {
@@ -847,6 +884,9 @@ static int do_packet_auto_bsf(AVFormatContext *s, AVPacket *pkt) {
                 st->internal->bitstream_checked = 1;
         }
     }
+
+    if (!st->internal->nb_bsfcs)
+        return do_new_extradata_copy(st->codecpar, pkt);
 
     for (i = 0; i < st->internal->nb_bsfcs; i++) {
         AVBSFContext *ctx = st->internal->bsfcs[i];
@@ -872,6 +912,20 @@ static int do_packet_auto_bsf(AVFormatContext *s, AVPacket *pkt) {
             return 0;
         }
     }
+
+    if (!s->internal->header_written) {
+        int side_size;
+        uint8_t *side = av_packet_get_side_data(pkt, AV_PKT_DATA_NEW_EXTRADATA, &side_size);
+        if (side && side_size > 0 && (side_size != st->codecpar->extradata_size ||
+                                      memcmp(side, st->codecpar->extradata, side_size))) {
+            av_freep(&st->codecpar->extradata);
+            if ((ret = ff_alloc_extradata(st->codecpar, side_size)) < 0)
+                return ret;
+            memcpy(st->codecpar->extradata, side, side_size);
+            st->codecpar->extradata_size = side_size;
+        }
+    }
+
     return 1;
 }
 
@@ -885,6 +939,11 @@ int av_write_frame(AVFormatContext *s, AVPacket *pkt)
 
     if (!pkt) {
         if (s->oformat->flags & AVFMT_ALLOW_FLUSH) {
+            if (!s->internal->header_written) {
+                ret = s->internal->write_header_ret ? s->internal->write_header_ret : write_header_internal(s);
+                if (ret < 0)
+                    return ret;
+            }
             ret = s->oformat->write_packet(s, NULL);
             flush_if_needed(s);
             if (ret >= 0 && s->pb && s->pb->error < 0)
@@ -1022,6 +1081,7 @@ int ff_interleave_packet_per_dts(AVFormatContext *s, AVPacket *out,
 {
     AVPacketList *pktl;
     int stream_count = 0;
+    int sparse_count = 0;
     int noninterleaved_count = 0;
     int i, ret;
     int eof = flush;
@@ -1034,6 +1094,10 @@ int ff_interleave_packet_per_dts(AVFormatContext *s, AVPacket *out,
     for (i = 0; i < s->nb_streams; i++) {
         if (s->streams[i]->last_in_packet_buffer) {
             ++stream_count;
+        } else if (s->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE ||
+                   s->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_DATA ||
+                   s->streams[i]->disposition & AV_DISPOSITION_ATTACHED_PIC) {
+            ++sparse_count;
         } else if (s->streams[i]->codecpar->codec_type != AVMEDIA_TYPE_ATTACHMENT &&
                    s->streams[i]->codecpar->codec_id != AV_CODEC_ID_VP8 &&
                    s->streams[i]->codecpar->codec_id != AV_CODEC_ID_VP9) {
@@ -1044,10 +1108,13 @@ int ff_interleave_packet_per_dts(AVFormatContext *s, AVPacket *out,
     if (s->internal->nb_interleaved_streams == stream_count)
         flush = 1;
 
-    if (s->max_interleave_delta > 0 &&
-        s->internal->packet_buffer &&
+    if (s->internal->packet_buffer &&
         !flush &&
-        s->internal->nb_interleaved_streams == stream_count+noninterleaved_count
+        ((s->max_interleave_delta > 0 &&
+          s->internal->nb_interleaved_streams == stream_count+sparse_count+noninterleaved_count) ||
+         (s->max_sparse_interleave_delta > 0 &&
+          sparse_count &&
+          s->internal->nb_interleaved_streams == stream_count+sparse_count))
     ) {
         AVPacket *top_pkt = &s->internal->packet_buffer->pkt;
         int64_t delta_dts = INT64_MIN;
@@ -1068,11 +1135,22 @@ int ff_interleave_packet_per_dts(AVFormatContext *s, AVPacket *out,
             delta_dts = FFMAX(delta_dts, last_dts - top_dts);
         }
 
-        if (delta_dts > s->max_interleave_delta) {
+        if (s->max_interleave_delta > 0 &&
+            delta_dts > s->max_interleave_delta &&
+            s->internal->nb_interleaved_streams == stream_count+sparse_count+noninterleaved_count) {
             av_log(s, AV_LOG_DEBUG,
                    "Delay between the first packet and last packet in the "
                    "muxing queue is %"PRId64" > %"PRId64": forcing output\n",
                    delta_dts, s->max_interleave_delta);
+            flush = 1;
+        } else if (s->max_sparse_interleave_delta > 0 &&
+                   delta_dts > s->max_sparse_interleave_delta &&
+                   s->internal->nb_interleaved_streams == stream_count+sparse_count) {
+            av_log(s, AV_LOG_DEBUG,
+                   "Delay between the first packet and last packet in the "
+                   "muxing queue is %"PRId64" > %"PRId64" and all delayed "
+                   "streams are sparse: forcing output\n",
+                   delta_dts, s->max_sparse_interleave_delta);
             flush = 1;
         }
     }
@@ -1268,8 +1346,14 @@ int av_write_trailer(AVFormatContext *s)
             goto fail;
     }
 
+    if (!s->internal->header_written) {
+        ret = s->internal->write_header_ret ? s->internal->write_header_ret : write_header_internal(s);
+        if (ret < 0)
+            goto fail;
+    }
+
 fail:
-    if (s->oformat->write_trailer) {
+    if (s->internal->header_written && s->oformat->write_trailer) {
         if (!(s->oformat->flags & AVFMT_NOFILE) && s->pb)
             avio_write_marker(s->pb, AV_NOPTS_VALUE, AVIO_DATA_MARKER_TRAILER);
         if (ret >= 0) {
@@ -1282,6 +1366,7 @@ fail:
     if (s->oformat->deinit)
         s->oformat->deinit(s);
 
+    s->internal->header_written =
     s->internal->initialized =
     s->internal->streams_initialized = 0;
 

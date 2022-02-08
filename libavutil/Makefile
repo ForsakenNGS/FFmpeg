@@ -23,6 +23,7 @@ HEADERS = adler32.h                                                     \
           des.h                                                         \
           dict.h                                                        \
           display.h                                                     \
+          dovi_meta.h                                                   \
           downmix_info.h                                                \
           encryption_info.h                                             \
           error.h                                                       \
@@ -79,6 +80,8 @@ HEADERS = adler32.h                                                     \
           version.h                                                     \
           xtea.h                                                        \
           tea.h                                                         \
+          extlib.h                                                      \
+#^PLEX
 
 HEADERS-$(CONFIG_LZO)                   += lzo.h
 
@@ -109,10 +112,12 @@ OBJS = adler32.o                                                        \
        des.o                                                            \
        dict.o                                                           \
        display.o                                                        \
+       dovi_meta.o                                                      \
        downmix_info.o                                                   \
        encryption_info.o                                                \
        error.o                                                          \
        eval.o                                                           \
+       extloader.o                                                      \
        fifo.o                                                           \
        file.o                                                           \
        file_open.o                                                      \
