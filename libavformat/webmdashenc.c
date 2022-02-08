@@ -31,7 +31,6 @@
 #include <string.h>
 
 #include "avformat.h"
-#include "avio_internal.h"
 #include "matroska.h"
 
 #include "libavutil/avstring.h"
@@ -57,22 +56,11 @@ typedef struct WebMDashMuxContext {
     char *utc_timing_url;
     double time_shift_buffer_depth;
     int minimum_update_period;
-    int debug_mode;
 } WebMDashMuxContext;
 
 static const char *get_codec_name(int codec_id)
 {
-    switch (codec_id) {
-        case AV_CODEC_ID_VP8:
-            return "vp8";
-        case AV_CODEC_ID_VP9:
-            return "vp9";
-        case AV_CODEC_ID_VORBIS:
-            return "vorbis";
-        case AV_CODEC_ID_OPUS:
-            return "opus";
-    }
-    return NULL;
+    return avcodec_descriptor_get(codec_id)->name;
 }
 
 static double get_duration(AVFormatContext *s)
@@ -114,7 +102,7 @@ static int write_header(AVFormatContext *s)
         if (!strftime(gmt_iso, 21, "%Y-%m-%dT%H:%M:%SZ", gmt)) {
             return AVERROR_UNKNOWN;
         }
-        if (w->debug_mode) {
+        if (s->flags & AVFMT_FLAG_BITEXACT) {
             av_strlcpy(gmt_iso, "", 1);
         }
         avio_printf(s->pb, "  availabilityStartTime=\"%s\"\n", gmt_iso);
@@ -183,8 +171,7 @@ static int write_representation(AVFormatContext *s, AVStream *stream, char *id,
     AVDictionaryEntry *filename = av_dict_get(stream->metadata, FILENAME, NULL, 0);
     AVDictionaryEntry *bandwidth = av_dict_get(stream->metadata, BANDWIDTH, NULL, 0);
     const char *bandwidth_str;
-    if ((w->is_live && (!filename)) ||
-        (!w->is_live && (!irange || !cues_start || !cues_end || !filename || !bandwidth))) {
+    if (!w->is_live && (!irange || !cues_start || !cues_end || !filename || !bandwidth)) {
         return AVERROR_INVALIDDATA;
     }
     avio_printf(s->pb, "<Representation id=\"%s\"", id);
@@ -273,70 +260,24 @@ static void free_adaptation_sets(AVFormatContext *s) {
 }
 
 /*
- * Parses a live header filename and computes the representation id,
- * initialization pattern and the media pattern. Pass NULL if you don't want to
- * compute any of those 3. Returns 0 on success and non-zero on failure.
+ * Parses a live header filename and returns the position of the '_' and '.'
+ * delimiting <file_description> and <representation_id>.
  *
  * Name of the header file should conform to the following pattern:
  * <file_description>_<representation_id>.hdr where <file_description> can be
  * anything. The chunks should be named according to the following pattern:
  * <file_description>_<representation_id>_<chunk_number>.chk
  */
-static int parse_filename(char *filename, char **representation_id,
-                          char **initialization_pattern, char **media_pattern) {
-    char *underscore_pos = NULL;
-    char *period_pos = NULL;
-    char *temp_pos = NULL;
-    char *filename_str = av_strdup(filename);
-    int ret = 0;
-
-    if (!filename_str) {
-        ret = AVERROR(ENOMEM);
-        goto end;
-    }
-    temp_pos = av_stristr(filename_str, "_");
-    while (temp_pos) {
-        underscore_pos = temp_pos + 1;
-        temp_pos = av_stristr(temp_pos + 1, "_");
-    }
-    if (!underscore_pos) {
-        ret = AVERROR_INVALIDDATA;
-        goto end;
-    }
-    period_pos = av_stristr(underscore_pos, ".");
-    if (!period_pos) {
-        ret = AVERROR_INVALIDDATA;
-        goto end;
-    }
-    *(underscore_pos - 1) = 0;
-    if (representation_id) {
-        *representation_id = av_malloc(period_pos - underscore_pos + 1);
-        if (!(*representation_id)) {
-            ret = AVERROR(ENOMEM);
-            goto end;
-        }
-        av_strlcpy(*representation_id, underscore_pos, period_pos - underscore_pos + 1);
-    }
-    if (initialization_pattern) {
-        *initialization_pattern = av_asprintf("%s_$RepresentationID$.hdr",
-                                              filename_str);
-        if (!(*initialization_pattern)) {
-            ret = AVERROR(ENOMEM);
-            goto end;
-        }
-    }
-    if (media_pattern) {
-        *media_pattern = av_asprintf("%s_$RepresentationID$_$Number$.chk",
-                                     filename_str);
-        if (!(*media_pattern)) {
-            ret = AVERROR(ENOMEM);
-            goto end;
-        }
-    }
-
-end:
-    av_freep(&filename_str);
-    return ret;
+static int split_filename(char *filename, char **underscore_pos,
+                          char **period_pos)
+{
+    *underscore_pos = strrchr(filename, '_');
+    if (!*underscore_pos)
+        return AVERROR(EINVAL);
+    *period_pos = strchr(*underscore_pos, '.');
+    if (!*period_pos)
+        return AVERROR(EINVAL);
+    return 0;
 }
 
 /*
@@ -395,58 +336,52 @@ static int write_adaptation_set(AVFormatContext *s, int as_index)
     if (w->is_live) {
         AVDictionaryEntry *filename =
             av_dict_get(s->streams[as->streams[0]]->metadata, FILENAME, NULL, 0);
-        char *initialization_pattern = NULL;
-        char *media_pattern = NULL;
-        int ret = parse_filename(filename->value, NULL, &initialization_pattern,
-                                 &media_pattern);
+        char *underscore_pos, *period_pos;
+        int ret;
+        if (!filename)
+            return AVERROR(EINVAL);
+        ret = split_filename(filename->value, &underscore_pos, &period_pos);
         if (ret) return ret;
+        *underscore_pos = '\0';
         avio_printf(s->pb, "<ContentComponent id=\"1\" type=\"%s\"/>\n",
                     par->codec_type == AVMEDIA_TYPE_VIDEO ? "video" : "audio");
         avio_printf(s->pb, "<SegmentTemplate");
         avio_printf(s->pb, " timescale=\"1000\"");
         avio_printf(s->pb, " duration=\"%d\"", w->chunk_duration);
-        avio_printf(s->pb, " media=\"%s\"", media_pattern);
+        avio_printf(s->pb, " media=\"%s_$RepresentationID$_$Number$.chk\"",
+                    filename->value);
         avio_printf(s->pb, " startNumber=\"%d\"", w->chunk_start_index);
-        avio_printf(s->pb, " initialization=\"%s\"", initialization_pattern);
+        avio_printf(s->pb, " initialization=\"%s_$RepresentationID$.hdr\"",
+                    filename->value);
         avio_printf(s->pb, "/>\n");
-        av_free(initialization_pattern);
-        av_free(media_pattern);
+        *underscore_pos = '_';
     }
 
     for (i = 0; i < as->nb_streams; i++) {
-        char *representation_id = NULL;
+        char buf[25], *representation_id = buf, *underscore_pos, *period_pos;
         int ret;
         if (w->is_live) {
             AVDictionaryEntry *filename =
                 av_dict_get(s->streams[as->streams[i]]->metadata, FILENAME, NULL, 0);
             if (!filename)
                 return AVERROR(EINVAL);
-            if (ret = parse_filename(filename->value, &representation_id, NULL, NULL))
+            ret = split_filename(filename->value, &underscore_pos, &period_pos);
+            if (ret < 0)
                 return ret;
+            representation_id = underscore_pos + 1;
+            *period_pos       = '\0';
         } else {
-            representation_id = av_asprintf("%d", w->representation_id++);
-            if (!representation_id) return AVERROR(ENOMEM);
+            snprintf(buf, sizeof(buf), "%d", w->representation_id++);
         }
         ret = write_representation(s, s->streams[as->streams[i]],
                                    representation_id, !width_in_as,
                                    !height_in_as, !sample_rate_in_as);
-        av_free(representation_id);
         if (ret) return ret;
+        if (w->is_live)
+            *period_pos = '.';
     }
     avio_printf(s->pb, "</AdaptationSet>\n");
     return 0;
-}
-
-static int to_integer(char *p, int len)
-{
-    int ret;
-    char *q = av_malloc(sizeof(char) * len);
-    if (!q)
-        return AVERROR(ENOMEM);
-    av_strlcpy(q, p, len);
-    ret = atoi(q);
-    av_free(q);
-    return ret;
 }
 
 static int parse_adaptation_sets(AVFormatContext *s)
@@ -461,10 +396,16 @@ static int parse_adaptation_sets(AVFormatContext *s)
     }
     // syntax id=0,streams=0,1,2 id=1,streams=3,4 and so on
     state = new_set;
-    while (p < w->adaptation_sets + strlen(w->adaptation_sets)) {
-        if (*p == ' ')
+    while (1) {
+        if (*p == '\0') {
+            if (state == new_set)
+                break;
+            else
+                return AVERROR(EINVAL);
+        } else if (state == new_set && *p == ' ') {
+            p++;
             continue;
-        else if (state == new_set && !strncmp(p, "id=", 3)) {
+        } else if (state == new_set && !strncmp(p, "id=", 3)) {
             void *mem = av_realloc(w->as, sizeof(*w->as) * (w->nb_as + 1));
             const char *comma;
             if (mem == NULL)
@@ -489,18 +430,18 @@ static int parse_adaptation_sets(AVFormatContext *s)
             state = parsing_streams;
         } else if (state == parsing_streams) {
             struct AdaptationSet *as = &w->as[w->nb_as - 1];
+            int64_t num;
             int ret = av_reallocp_array(&as->streams, ++as->nb_streams,
                                         sizeof(*as->streams));
             if (ret < 0)
                 return ret;
-            q = p;
-            while (*q != '\0' && *q != ',' && *q != ' ') q++;
-            as->streams[as->nb_streams - 1] = to_integer(p, q - p + 1);
-            if (as->streams[as->nb_streams - 1] < 0 ||
-                as->streams[as->nb_streams - 1] >= s->nb_streams) {
+            num = strtoll(p, &q, 10);
+            if (!av_isdigit(*p) || (*q != ' ' && *q != '\0' && *q != ',') ||
+                num < 0 || num >= s->nb_streams) {
                 av_log(s, AV_LOG_ERROR, "Invalid value for 'streams' in adapation_sets.\n");
                 return AVERROR(EINVAL);
             }
+            as->streams[as->nb_streams - 1] = num;
             if (*q == '\0') break;
             if (*q == ' ') state = new_set;
             p = ++q;
@@ -559,16 +500,9 @@ static int webm_dash_manifest_write_packet(AVFormatContext *s, AVPacket *pkt)
     return AVERROR_EOF;
 }
 
-static int webm_dash_manifest_write_trailer(AVFormatContext *s)
-{
-    free_adaptation_sets(s);
-    return 0;
-}
-
 #define OFFSET(x) offsetof(WebMDashMuxContext, x)
 static const AVOption options[] = {
     { "adaptation_sets", "Adaptation sets. Syntax: id=0,streams=0,1,2 id=1,streams=3,4 and so on", OFFSET(adaptation_sets), AV_OPT_TYPE_STRING, { 0 }, 0, 0, AV_OPT_FLAG_ENCODING_PARAM },
-    { "debug_mode", "[private option - users should never set this]. Create deterministic output", OFFSET(debug_mode), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
     { "live", "create a live stream manifest", OFFSET(is_live), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
     { "chunk_start_index",  "start index of the chunk", OFFSET(chunk_start_index), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
     { "chunk_duration_ms", "duration of each chunk (in milliseconds)", OFFSET(chunk_duration), AV_OPT_TYPE_INT, {.i64 = 1000}, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
@@ -578,7 +512,6 @@ static const AVOption options[] = {
     { NULL },
 };
 
-#if CONFIG_WEBM_DASH_MANIFEST_MUXER
 static const AVClass webm_dash_class = {
     .class_name = "WebM DASH Manifest muxer",
     .item_name  = av_default_item_name,
@@ -594,7 +527,5 @@ AVOutputFormat ff_webm_dash_manifest_muxer = {
     .priv_data_size    = sizeof(WebMDashMuxContext),
     .write_header      = webm_dash_manifest_write_header,
     .write_packet      = webm_dash_manifest_write_packet,
-    .write_trailer     = webm_dash_manifest_write_trailer,
     .priv_class        = &webm_dash_class,
 };
-#endif

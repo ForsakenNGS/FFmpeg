@@ -30,7 +30,6 @@
  * SBC decoder implementation
  */
 
-#include <stdbool.h>
 #include "avcodec.h"
 #include "internal.h"
 #include "libavutil/intreadwrite.h"
@@ -323,6 +322,8 @@ static int sbc_decode_init(AVCodecContext *avctx)
 {
     SBCDecContext *sbc = avctx->priv_data;
     int i, ch;
+
+    avctx->sample_fmt = AV_SAMPLE_FMT_S16P;
 
     sbc->frame.crc_ctx = av_crc_get_table(AV_CRC_8_EBU);
 

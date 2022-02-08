@@ -410,7 +410,7 @@ static int init_tiles(Jpeg2000EncoderContext *s)
     s->numXtiles = ff_jpeg2000_ceildiv(s->width, s->tile_width);
     s->numYtiles = ff_jpeg2000_ceildiv(s->height, s->tile_height);
 
-    s->tile = av_malloc_array(s->numXtiles, s->numYtiles * sizeof(Jpeg2000Tile));
+    s->tile = av_calloc(s->numXtiles, s->numYtiles * sizeof(Jpeg2000Tile));
     if (!s->tile)
         return AVERROR(ENOMEM);
     for (tileno = 0, tiley = 0; tiley < s->numYtiles; tiley++)
@@ -521,13 +521,13 @@ static void init_luts(void)
         mask = ~((1<<NMSEDEC_FRACBITS)-1);
 
     for (i = 0; i < (1 << NMSEDEC_BITS); i++){
-        lut_nmsedec_sig[i]  = FFMAX(6*i - (9<<NMSEDEC_FRACBITS-1) << 12-NMSEDEC_FRACBITS, 0);
+        lut_nmsedec_sig[i]  = FFMAX((3 * i << (13 - NMSEDEC_FRACBITS)) - (9 << 11), 0);
         lut_nmsedec_sig0[i] = FFMAX((i*i + (1<<NMSEDEC_FRACBITS-1) & mask) << 1, 0);
 
         a = (i >> (NMSEDEC_BITS-2)&2) + 1;
-        lut_nmsedec_ref[i]  = FFMAX((-2*i + (1<<NMSEDEC_FRACBITS) + a*i - (a*a<<NMSEDEC_FRACBITS-2))
-                                    << 13-NMSEDEC_FRACBITS, 0);
-        lut_nmsedec_ref0[i] = FFMAX(((i*i + (1-4*i << NMSEDEC_FRACBITS-1) + (1<<2*NMSEDEC_FRACBITS)) & mask)
+        lut_nmsedec_ref[i]  = FFMAX((a - 2) * (i << (13 - NMSEDEC_FRACBITS)) +
+                                    (1 << 13) - (a * a << 11), 0);
+        lut_nmsedec_ref0[i] = FFMAX(((i * i - (i << NMSEDEC_BITS) + (1 << 2 * NMSEDEC_FRACBITS) + (1 << (NMSEDEC_FRACBITS - 1))) & mask)
                                     << 1, 0);
     }
 }
@@ -927,7 +927,7 @@ static int encode_tile(Jpeg2000EncoderContext *s, Jpeg2000Tile *tile, int tileno
                             for (y = yy0; y < yy1; y++){
                                 int *ptr = t1.data + (y-yy0)*t1.stride;
                                 for (x = xx0; x < xx1; x++){
-                                    *ptr++ = comp->i_data[(comp->coord[0][1] - comp->coord[0][0]) * y + x] << NMSEDEC_FRACBITS;
+                                    *ptr++ = comp->i_data[(comp->coord[0][1] - comp->coord[0][0]) * y + x] * (1 << NMSEDEC_FRACBITS);
                                 }
                             }
                         } else{
@@ -972,12 +972,16 @@ static void cleanup(Jpeg2000EncoderContext *s)
     int tileno, compno;
     Jpeg2000CodingStyle *codsty = &s->codsty;
 
+    if (!s->tile)
+        return;
     for (tileno = 0; tileno < s->numXtiles * s->numYtiles; tileno++){
-        for (compno = 0; compno < s->ncomponents; compno++){
-            Jpeg2000Component *comp = s->tile[tileno].comp + compno;
-            ff_jpeg2000_cleanup(comp, codsty);
+        if (s->tile[tileno].comp) {
+            for (compno = 0; compno < s->ncomponents; compno++){
+                Jpeg2000Component *comp = s->tile[tileno].comp + compno;
+                ff_jpeg2000_cleanup(comp, codsty);
+            }
+            av_freep(&s->tile[tileno].comp);
         }
-        av_freep(&s->tile[tileno].comp);
     }
     av_freep(&s->tile);
 }
@@ -1258,4 +1262,5 @@ AVCodec ff_jpeg2000_encoder = {
         AV_PIX_FMT_NONE
     },
     .priv_class     = &j2k_class,
+    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
 };

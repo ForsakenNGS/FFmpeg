@@ -143,6 +143,7 @@ static int wc3_read_header(AVFormatContext *s)
                 goto fail;
             }
             if ((ret = avio_read(pb, buffer, size)) != size) {
+                av_freep(&buffer);
                 ret =  AVERROR(EIO);
                 goto fail;
             }

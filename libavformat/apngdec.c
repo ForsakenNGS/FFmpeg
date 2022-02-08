@@ -127,17 +127,18 @@ static int append_extradata(AVCodecParameters *par, AVIOContext *pb, int len)
     int new_size, ret;
     uint8_t *new_extradata;
 
-    if (previous_size > INT_MAX - len)
+    if (len > INT_MAX - AV_INPUT_BUFFER_PADDING_SIZE - previous_size)
         return AVERROR_INVALIDDATA;
 
     new_size = previous_size + len;
     new_extradata = av_realloc(par->extradata, new_size + AV_INPUT_BUFFER_PADDING_SIZE);
     if (!new_extradata)
         return AVERROR(ENOMEM);
+    memset(new_extradata + new_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
     par->extradata = new_extradata;
     par->extradata_size = new_size;
 
-    if ((ret = avio_read(pb, par->extradata + previous_size, len)) < 0)
+    if ((ret = ffio_read_size(pb, par->extradata + previous_size, len)) < 0)
         return ret;
 
     return previous_size;
@@ -177,18 +178,17 @@ static int apng_read_header(AVFormatContext *s)
         return ret;
 
     /* extradata will contain every chunk up to the first fcTL (excluded) */
-    st->codecpar->extradata = av_malloc(len + 12 + AV_INPUT_BUFFER_PADDING_SIZE);
-    if (!st->codecpar->extradata)
-        return AVERROR(ENOMEM);
-    st->codecpar->extradata_size = len + 12;
+    ret = ff_alloc_extradata(st->codecpar, len + 12);
+    if (ret < 0)
+        return ret;
     AV_WB32(st->codecpar->extradata,    len);
     AV_WL32(st->codecpar->extradata+4,  tag);
     AV_WB32(st->codecpar->extradata+8,  st->codecpar->width);
     AV_WB32(st->codecpar->extradata+12, st->codecpar->height);
-    if ((ret = avio_read(pb, st->codecpar->extradata+16, 9)) < 0)
-        goto fail;
+    if ((ret = ffio_read_size(pb, st->codecpar->extradata + 16, 9)) < 0)
+        return ret;
 
-    while (!avio_feof(pb)) {
+    while (1) {
         if (acTL_found && ctx->num_play != 1) {
             int64_t size   = avio_size(pb);
             int64_t offset = avio_tell(pb);
@@ -208,7 +208,7 @@ static int apng_read_header(AVFormatContext *s)
             goto fail;
 
         len = avio_rb32(pb);
-        if (len > 0x7fffffff) {
+        if (len > INT_MAX - 12) {
             ret = AVERROR_INVALIDDATA;
             goto fail;
         }
@@ -241,10 +241,6 @@ static int apng_read_header(AVFormatContext *s)
     }
 
 fail:
-    if (st->codecpar->extradata_size) {
-        av_freep(&st->codecpar->extradata);
-        st->codecpar->extradata_size = 0;
-    }
     return ret;
 }
 

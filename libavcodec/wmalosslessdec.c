@@ -189,13 +189,10 @@ static av_cold int decode_init(AVCodecContext *avctx)
         return AVERROR(EINVAL);
     }
 
-    if (avctx->channels < 0) {
-        av_log(avctx, AV_LOG_ERROR, "invalid number of channels %d\n",
-               avctx->channels);
-        return AVERROR_INVALIDDATA;
-    } else if (avctx->channels > WMALL_MAX_CHANNELS) {
+    av_assert0(avctx->channels >= 0);
+    if (avctx->channels > WMALL_MAX_CHANNELS) {
         avpriv_request_sample(avctx,
-                              "More than %d channels", WMALL_MAX_CHANNELS);
+                              "More than " AV_STRINGIFY(WMALL_MAX_CHANNELS) " channels");
         return AVERROR_PATCHWELCOME;
     }
 
@@ -1336,6 +1333,7 @@ AVCodec ff_wmalossless_decoder = {
     .decode         = decode_packet,
     .flush          = flush,
     .capabilities   = AV_CODEC_CAP_SUBFRAMES | AV_CODEC_CAP_DR1 | AV_CODEC_CAP_DELAY,
+    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
     .sample_fmts    = (const enum AVSampleFormat[]) { AV_SAMPLE_FMT_S16P,
                                                       AV_SAMPLE_FMT_S32P,
                                                       AV_SAMPLE_FMT_NONE },

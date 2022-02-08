@@ -129,6 +129,8 @@ retry:
 
     return buf_size - z->avail_out;
 }
+
+static av_cold int swf_read_close(AVFormatContext *avctx);
 #endif
 
 static int swf_read_header(AVFormatContext *s)
@@ -143,17 +145,18 @@ static int swf_read_header(AVFormatContext *s)
     if (tag == MKBETAG('C', 'W', 'S', 0)) {
         av_log(s, AV_LOG_INFO, "SWF compressed file detected\n");
 #if CONFIG_ZLIB
-        swf->zbuf_in  = av_malloc(ZBUF_SIZE);
-        swf->zbuf_out = av_malloc(ZBUF_SIZE);
-        swf->zpb = avio_alloc_context(swf->zbuf_out, ZBUF_SIZE, 0, s,
-                                      zlib_refill, NULL, NULL);
-        if (!swf->zbuf_in || !swf->zbuf_out || !swf->zpb)
-            return AVERROR(ENOMEM);
-        swf->zpb->seekable = 0;
         if (inflateInit(&swf->zstream) != Z_OK) {
             av_log(s, AV_LOG_ERROR, "Unable to init zlib context\n");
             return AVERROR(EINVAL);
         }
+        if (!(swf->zbuf_in  = av_malloc(ZBUF_SIZE)) ||
+            !(swf->zbuf_out = av_malloc(ZBUF_SIZE)) ||
+            !(swf->zpb = avio_alloc_context(swf->zbuf_out, ZBUF_SIZE, 0,
+                                            s, zlib_refill, NULL, NULL))) {
+            swf_read_close(s);
+            return AVERROR(ENOMEM);
+        }
+        swf->zpb->seekable = 0;
         pb = swf->zpb;
 #else
         av_log(s, AV_LOG_ERROR, "zlib support is required to read SWF compressed files\n");
@@ -397,7 +400,6 @@ static int swf_read_packet(AVFormatContext *s, AVPacket *pkt)
 
             if (linesize * height > pkt->size) {
                 res = AVERROR_INVALIDDATA;
-                av_packet_unref(pkt);
                 goto bitmap_end;
             }
 
@@ -487,7 +489,6 @@ bitmap_end_skip:
             if ((res = av_new_packet(pkt, len)) < 0)
                 return res;
             if (avio_read(pb, pkt->data, 4) != 4) {
-                av_packet_unref(pkt);
                 return AVERROR_INVALIDDATA;
             }
             if (AV_RB32(pkt->data) == 0xffd8ffd9 ||
@@ -504,7 +505,6 @@ bitmap_end_skip:
             }
             if (res != pkt->size) {
                 if (res < 0) {
-                    av_packet_unref(pkt);
                     return res;
                 }
                 av_shrink_packet(pkt, res);

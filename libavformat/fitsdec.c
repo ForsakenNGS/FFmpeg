@@ -189,7 +189,6 @@ static int fits_read_packet(AVFormatContext *s, AVPacket *pkt)
 
     ret = av_bprint_finalize(&avbuf, &buf);
     if (ret < 0) {
-        av_packet_unref(pkt);
         return ret;
     }
 
@@ -198,7 +197,6 @@ static int fits_read_packet(AVFormatContext *s, AVPacket *pkt)
     av_freep(&buf);
     ret = avio_read(s->pb, pkt->data + pkt->size, size);
     if (ret < 0) {
-        av_packet_unref(pkt);
         return ret;
     }
 

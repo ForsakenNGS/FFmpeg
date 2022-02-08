@@ -1,6 +1,4 @@
 Files without standard license headers:
-compat/avisynth/windowsPorts/basicDataTypeConversions.h
-compat/avisynth/windowsPorts/windows2linux.h
 libavcodec/file_open.c
 libavcodec/ilbcdata.h
 libavcodec/ilbcdec.c
@@ -9,6 +7,7 @@ libavcodec/log2_tab.c
 libavcodec/reverse.c
 libavdevice/file_open.c
 libavdevice/reverse.c
+libavfilter/af_arnndn.c
 libavfilter/log2_tab.c
 libavformat/file_open.c
 libavformat/golomb_tab.c

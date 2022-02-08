@@ -653,7 +653,7 @@ int ff_cbs_alloc_unit_content(CodedBitstreamContext *ctx,
         return AVERROR(ENOMEM);
 
     unit->content_ref = av_buffer_create(unit->content, size,
-                                         free, ctx, 0);
+                                         free, NULL, 0);
     if (!unit->content_ref) {
         av_freep(&unit->content);
         return AVERROR(ENOMEM);
@@ -775,8 +775,11 @@ int ff_cbs_insert_unit_data(CodedBitstreamContext *ctx,
         data_ref = av_buffer_ref(data_buf);
     else
         data_ref = av_buffer_create(data, data_size, NULL, NULL, 0);
-    if (!data_ref)
+    if (!data_ref) {
+        if (!data_buf)
+            av_free(data);
         return AVERROR(ENOMEM);
+    }
 
     err = cbs_insert_unit(ctx, frag, position);
     if (err < 0) {

@@ -305,7 +305,7 @@ static int rv10_decode_picture_header(MpegEncContext *s)
     return mb_count;
 }
 
-static int rv20_decode_picture_header(RVDecContext *rv)
+static int rv20_decode_picture_header(RVDecContext *rv, int whole_size)
 {
     MpegEncContext *s = &rv->m;
     int seq, mb_pos, i, ret;
@@ -383,6 +383,10 @@ static int rv20_decode_picture_header(RVDecContext *rv)
                    "attempting to change resolution to %dx%d\n", new_w, new_h);
             if (av_image_check_size(new_w, new_h, 0, s->avctx) < 0)
                 return AVERROR_INVALIDDATA;
+
+            if (whole_size < (new_w + 15)/16 * ((new_h + 15)/16) / 8)
+                return AVERROR_INVALIDDATA;
+
             ff_mpv_common_end(s);
 
             // attempt to keep aspect during typical resolution switches
@@ -550,7 +554,7 @@ static av_cold int rv10_decode_end(AVCodecContext *avctx)
 }
 
 static int rv10_decode_packet(AVCodecContext *avctx, const uint8_t *buf,
-                              int buf_size, int buf_size2)
+                              int buf_size, int buf_size2, int whole_size)
 {
     RVDecContext *rv = avctx->priv_data;
     MpegEncContext *s = &rv->m;
@@ -561,7 +565,7 @@ static int rv10_decode_packet(AVCodecContext *avctx, const uint8_t *buf,
     if (s->codec_id == AV_CODEC_ID_RV10)
         mb_count = rv10_decode_picture_header(s);
     else
-        mb_count = rv20_decode_picture_header(rv);
+        mb_count = rv20_decode_picture_header(rv, whole_size);
     if (mb_count < 0) {
         if (mb_count != ERROR_SKIP_FRAME)
             av_log(s->avctx, AV_LOG_ERROR, "HEADER ERROR\n");
@@ -579,6 +583,9 @@ static int rv10_decode_packet(AVCodecContext *avctx, const uint8_t *buf,
         av_log(s->avctx, AV_LOG_ERROR, "COUNT ERROR\n");
         return AVERROR_INVALIDDATA;
     }
+
+    if (whole_size < s->mb_width * s->mb_height / 8)
+        return AVERROR_INVALIDDATA;
 
     if ((s->mb_x == 0 && s->mb_y == 0) || !s->current_picture_ptr) {
         // FIXME write parser so we always have complete frames?
@@ -754,7 +761,7 @@ static int rv10_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
             offset + FFMAX(size, size2) > buf_size)
             return AVERROR_INVALIDDATA;
 
-        if ((ret = rv10_decode_packet(avctx, buf + offset, size, size2)) < 0)
+        if ((ret = rv10_decode_packet(avctx, buf + offset, size, size2, buf_size)) < 0)
             return ret;
 
         if (ret > 8 * size)

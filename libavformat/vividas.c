@@ -279,15 +279,13 @@ static uint8_t *read_sb_block(AVIOContext *src, unsigned *size,
 
 static int track_header(VividasDemuxContext *viv, AVFormatContext *s,  uint8_t *buf, int size)
 {
-    int i,j;
+    int i, j, ret;
     int64_t off;
     int val_1;
     int num_video;
-    AVIOContext *pb;
+    AVIOContext pb0, *pb = &pb0;
 
-    pb = avio_alloc_context(buf, size, 0, NULL, NULL, NULL, NULL);
-    if (!pb)
-        return AVERROR(ENOMEM);
+    ffio_init_context(pb, buf, size, 0, NULL, NULL, NULL, NULL);
 
     ffio_read_varlen(pb); // track_header_len
     avio_r8(pb); // '1'
@@ -322,6 +320,10 @@ static int track_header(VividasDemuxContext *viv, AVFormatContext *s,  uint8_t *
 
     for (i = 0; i < num_video; i++) {
         AVStream *st = avformat_new_stream(s, NULL);
+        int num, den;
+
+        if (!st)
+            return AVERROR(ENOMEM);
 
         st->id = i;
 
@@ -332,8 +334,9 @@ static int track_header(VividasDemuxContext *viv, AVFormatContext *s,  uint8_t *
         off += ffio_read_varlen(pb);
         avio_r8(pb); // '3'
         avio_r8(pb); // val_7
-        st->time_base.num = avio_rl32(pb); // frame_time
-        st->time_base.den = avio_rl32(pb); // time_base
+        num = avio_rl32(pb); // frame_time
+        den = avio_rl32(pb); // time_base
+        avpriv_set_pts_info(st, 64, num, den);
         st->nb_frames = avio_rl32(pb); // n frames
         st->codecpar->width = avio_rl16(pb); // width
         st->codecpar->height = avio_rl16(pb); // height
@@ -355,6 +358,8 @@ static int track_header(VividasDemuxContext *viv, AVFormatContext *s,  uint8_t *
     for(i=0;i<viv->num_audio;i++) {
         int q;
         AVStream *st = avformat_new_stream(s, NULL);
+        if (!st)
+            return AVERROR(ENOMEM);
 
         st->id = num_video + i;
 
@@ -388,17 +393,15 @@ static int track_header(VividasDemuxContext *viv, AVFormatContext *s,  uint8_t *
             for (j = 0; j < num_data; j++) {
                 int64_t len = ffio_read_varlen(pb);
                 if (len < 0 || len > INT_MAX/2 - xd_size) {
-                    av_free(pb);
                     return AVERROR_INVALIDDATA;
                 }
                 data_len[j] = len;
                 xd_size += len + 1 + len/255;
             }
 
-            if (ff_alloc_extradata(st->codecpar, xd_size)) {
-                av_free(pb);
-                return AVERROR(ENOMEM);
-            }
+            ret = ff_alloc_extradata(st->codecpar, xd_size);
+            if (ret < 0)
+                return ret;
 
             p = st->codecpar->extradata;
             p[0] = 2;
@@ -425,7 +428,6 @@ static int track_header(VividasDemuxContext *viv, AVFormatContext *s,  uint8_t *
         }
     }
 
-    av_free(pb);
     return 0;
 }
 
@@ -434,25 +436,23 @@ static int track_index(VividasDemuxContext *viv, AVFormatContext *s, uint8_t *bu
     int64_t off;
     int64_t poff;
     int maxnp=0;
-    AVIOContext *pb;
+    AVIOContext pb0, *pb = &pb0;
     int i;
     int64_t filesize = avio_size(s->pb);
+    uint64_t n_sb_blocks_tmp;
 
-    pb = avio_alloc_context(buf, size, 0, NULL, NULL, NULL, NULL);
-    if (!pb)
-        return AVERROR(ENOMEM);
+    ffio_init_context(pb, buf, size, 0, NULL, NULL, NULL, NULL);
 
     ffio_read_varlen(pb); // track_index_len
     avio_r8(pb); // 'c'
-    viv->n_sb_blocks = ffio_read_varlen(pb);
-    if (viv->n_sb_blocks < 0 || viv->n_sb_blocks > size / 2)
-        goto error;
-    viv->sb_blocks = av_calloc(viv->n_sb_blocks, sizeof(VIV_SB_block));
+    n_sb_blocks_tmp = ffio_read_varlen(pb);
+    if (n_sb_blocks_tmp > size / 2)
+        return AVERROR_INVALIDDATA;
+    viv->sb_blocks = av_calloc(n_sb_blocks_tmp, sizeof(*viv->sb_blocks));
     if (!viv->sb_blocks) {
-        viv->n_sb_blocks = 0;
-        av_free(pb);
         return AVERROR(ENOMEM);
     }
+    viv->n_sb_blocks = n_sb_blocks_tmp;
 
     off = 0;
     poff = 0;
@@ -462,7 +462,7 @@ static int track_index(VividasDemuxContext *viv, AVFormatContext *s, uint8_t *bu
         uint64_t n_packets_tmp = ffio_read_varlen(pb);
 
         if (size_tmp > INT_MAX || n_packets_tmp > INT_MAX)
-            goto error;
+            return AVERROR_INVALIDDATA;
 
         viv->sb_blocks[i].byte_offset = off;
         viv->sb_blocks[i].packet_offset = poff;
@@ -478,17 +478,13 @@ static int track_index(VividasDemuxContext *viv, AVFormatContext *s, uint8_t *bu
     }
 
     if (filesize > 0 && poff > filesize)
-        goto error;
+        return AVERROR_INVALIDDATA;
 
     viv->sb_entries = av_calloc(maxnp, sizeof(VIV_SB_entry));
-    av_free(pb);
+    if (!viv->sb_entries)
+        return AVERROR(ENOMEM);
 
     return 0;
-error:
-    av_free(pb);
-    viv->n_sb_blocks = 0;
-    av_freep(&viv->sb_blocks);
-    return AVERROR_INVALIDDATA;
 }
 
 static void load_sb_block(AVFormatContext *s, VividasDemuxContext *viv, unsigned expected_size)
@@ -617,7 +613,7 @@ static int viv_read_header(AVFormatContext *s)
     ret = track_index(viv, s, buf, v);
     av_free(buf);
     if (ret < 0)
-        return ret;
+        goto fail;
 
     viv->sb_offset = avio_tell(pb);
     if (viv->n_sb_blocks > 0) {
@@ -628,6 +624,9 @@ static int viv_read_header(AVFormatContext *s)
     }
 
     return 0;
+fail:
+    av_freep(&viv->sb_blocks);
+    return ret;
 }
 
 static int viv_read_packet(AVFormatContext *s,
@@ -656,7 +655,7 @@ static int viv_read_packet(AVFormatContext *s,
         pkt->stream_index = 1;
         astream = s->streams[pkt->stream_index];
 
-        pkt->pts = av_rescale(viv->audio_sample, astream->time_base.den, astream->time_base.num) / astream->codecpar->sample_rate;
+        pkt->pts = av_rescale_q(viv->audio_sample, av_make_q(1, astream->codecpar->sample_rate), astream->time_base);
         viv->audio_sample += viv->audio_subpackets[viv->current_audio_subpacket].pcm_bytes / 2 / astream->codecpar->channels;
         pkt->flags |= AV_PKT_FLAG_KEY;
         viv->current_audio_subpacket++;

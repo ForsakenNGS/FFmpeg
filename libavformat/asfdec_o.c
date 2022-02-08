@@ -360,7 +360,6 @@ static int asf_set_metadata(AVFormatContext *s, const uint8_t *name,
  * but in reality this is only loosely similar */
 static int asf_read_picture(AVFormatContext *s, int len)
 {
-    ASFContext *asf       = s->priv_data;
     AVPacket pkt          = { 0 };
     const CodecMime *mime = ff_id3v2_mime_tags;
     enum  AVCodecID id    = AV_CODEC_ID_NONE;
@@ -368,7 +367,6 @@ static int asf_read_picture(AVFormatContext *s, int len)
     uint8_t  *desc = NULL;
     AVStream   *st = NULL;
     int ret, type, picsize, desc_len;
-    ASFStream *asf_st;
 
     /* type + picsize + mime + desc */
     if (len < 1 + 4 + 2 + 2) {
@@ -425,21 +423,13 @@ static int asf_read_picture(AVFormatContext *s, int len)
         ret = AVERROR(ENOMEM);
         goto fail;
     }
-    asf->asf_st[asf->nb_streams] = av_mallocz(sizeof(*asf_st));
-    asf_st = asf->asf_st[asf->nb_streams];
-    if (!asf_st) {
-        ret = AVERROR(ENOMEM);
-        goto fail;
-    }
 
     st->disposition              |= AV_DISPOSITION_ATTACHED_PIC;
-    st->codecpar->codec_type      = asf_st->type = AVMEDIA_TYPE_VIDEO;
+    st->codecpar->codec_type      = AVMEDIA_TYPE_VIDEO;
     st->codecpar->codec_id        = id;
     st->attached_pic              = pkt;
-    st->attached_pic.stream_index = asf_st->index = st->index;
+    st->attached_pic.stream_index = st->index;
     st->attached_pic.flags       |= AV_PKT_FLAG_KEY;
-
-    asf->nb_streams++;
 
     if (*desc) {
         if (av_dict_set(&st->metadata, "title", desc, AV_DICT_DONT_STRDUP_VAL) < 0)
@@ -464,8 +454,8 @@ static void get_id3_tag(AVFormatContext *s, int len)
 
     ff_id3v2_read(s, ID3v2_DEFAULT_MAGIC, &id3v2_extra_meta, len);
     if (id3v2_extra_meta) {
-        ff_id3v2_parse_apic(s, &id3v2_extra_meta);
-        ff_id3v2_parse_chapters(s, &id3v2_extra_meta);
+        ff_id3v2_parse_apic(s, id3v2_extra_meta);
+        ff_id3v2_parse_chapters(s, id3v2_extra_meta);
     }
     ff_id3v2_free_extra_meta(&id3v2_extra_meta);
 }
@@ -1159,7 +1149,7 @@ static int asf_read_replicated_data(AVFormatContext *s, ASFPacket *asf_pkt)
     } else
         avio_skip(pb, 4); // reading of media object size is already done
     asf_pkt->dts = avio_rl32(pb); // read presentation time
-    if (asf->rep_data_len && (asf->rep_data_len >= 8))
+    if (asf->rep_data_len >= 8)
         avio_skip(pb, asf->rep_data_len - 8); // skip replicated data
 
     return 0;

@@ -19,68 +19,48 @@
 #ifndef AVCODEC_MF_UTILS_H
 #define AVCODEC_MF_UTILS_H
 
-#include <errno.h>
-
 #include <windows.h>
 #include <initguid.h>
-#include <wmcodecdsp.h>
-#include <mftransform.h>
+#ifdef _MSC_VER
+// The official way of including codecapi (via dshow.h) makes the ICodecAPI
+// interface unavailable in UWP mode, but including icodecapi.h + codecapi.h
+// seems to be equivalent. (These headers conflict with the official way
+// of including it though, through strmif.h via dshow.h. And on mingw, the
+// mf*.h headers below indirectly include strmif.h.)
+#include <icodecapi.h>
+#else
+#include <dshow.h>
+// Older versions of mingw-w64 need codecapi.h explicitly included, while newer
+// ones include it implicitly from dshow.h (via uuids.h).
+#include <codecapi.h>
+#endif
 #include <mfapi.h>
 #include <mferror.h>
 #include <mfobjects.h>
-#include <ksmedia.h>
-#include <uuids.h>
-#include <codecapi.h>
-
-#include "libavutil/avassert.h"
-#include "libavutil/imgutils.h"
-#include "libavutil/opt.h"
+#include <mftransform.h>
 
 #include "avcodec.h"
-#include "internal.h"
 
-// ugly wrappers for mingw not providing these functions
-
-// the attribute/ratio setter/getters are guarded by __cplusplus
-
-HRESULT ff_MFGetAttributeSize(
-  _In_  IMFAttributes *pAttributes,
-  _In_  REFGUID       guidKey,
-  _Out_ UINT32        *punWidth,
-  _Out_ UINT32        *punHeight
-);
-
-HRESULT ff_MFSetAttributeSize(
-  _In_ IMFAttributes *pAttributes,
-  _In_ REFGUID       guidKey,
-  _In_ UINT32        unWidth,
-  _In_ UINT32        unHeight
-);
-
+// These functions do exist in mfapi.h, but are only available within
+// __cplusplus ifdefs.
+HRESULT ff_MFGetAttributeSize(IMFAttributes *pattr, REFGUID guid,
+                              UINT32 *pw, UINT32 *ph);
+HRESULT ff_MFSetAttributeSize(IMFAttributes *pattr, REFGUID guid,
+                              UINT32 uw, UINT32 uh);
 #define ff_MFSetAttributeRatio ff_MFSetAttributeSize
 #define ff_MFGetAttributeRatio ff_MFGetAttributeSize
 
-// mingw declares this, but it's missing from the import lib
-HRESULT ff_MFTEnumEx(
-    _In_        GUID                   guidCategory,
-    _In_        UINT32                 Flags,
-    _In_  const MFT_REGISTER_TYPE_INFO *pInputType,
-    _In_  const MFT_REGISTER_TYPE_INFO *pOutputType,
-    _Out_       IMFActivate            ***pppMFTActivate,
-    _Out_       UINT32                 *pcMFTActivate
-);
+// MFTEnumEx was missing from mingw-w64's mfplat import library until
+// mingw-w64 v6.0.0, thus wrap it and load it using GetProcAddress.
+// It's also missing in Windows Vista's mfplat.dll.
+HRESULT ff_MFTEnumEx(GUID guidCategory, UINT32 Flags,
+                     const MFT_REGISTER_TYPE_INFO *pInputType,
+                     const MFT_REGISTER_TYPE_INFO *pOutputType,
+                     IMFActivate ***pppMFTActivate, UINT32 *pnumMFTActivate);
 
-DEFINE_GUID(ff_MF_MT_VIDEO_ROTATION, 0xc380465d, 0x2271, 0x428c, 0x9b, 0x83, 0xec, 0xea, 0x3b, 0x4a, 0x85, 0xc1);
-DEFINE_GUID(ff_CODECAPI_AVDecVideoAcceleration_H264, 0xf7db8a2f, 0x4f48, 0x4ee8, 0xae, 0x31, 0x8b, 0x6e, 0xbe, 0x55, 0x8a, 0xe2);
 
-// WMA1. Apparently there is no official GUID symbol for this.
-DEFINE_GUID(ff_MFAudioFormat_MSAUDIO1, 0x00000160, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71);
-
-// MP42 FourCC. I made up the symbol name.
-DEFINE_GUID(ff_MFVideoFormat_MP42, 0x3234504D, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71);
-
-// From mingw's headers. Don't ask me why mingw's header (apparently) doesn't define
-// them properly. It's all batshit murder clown insane.
+// These do exist in mingw-w64's codecapi.h, but they aren't properly defined
+// by the header until after mingw-w64 v7.0.0.
 DEFINE_GUID(ff_CODECAPI_AVDecVideoThumbnailGenerationMode, 0x2efd8eee,0x1150,0x4328,0x9c,0xf5,0x66,0xdc,0xe9,0x33,0xfc,0xf4);
 DEFINE_GUID(ff_CODECAPI_AVDecVideoDropPicWithMissingRef, 0xf8226383,0x14c2,0x4567,0x97,0x34,0x50,0x04,0xe9,0x6f,0xf8,0x87);
 DEFINE_GUID(ff_CODECAPI_AVDecVideoSoftwareDeinterlaceMode, 0x0c08d1ce,0x9ced,0x4540,0xba,0xe3,0xce,0xb3,0x80,0x14,0x11,0x09);
@@ -139,6 +119,7 @@ DEFINE_GUID(ff_CODECAPI_AVEncMPVFrameFieldMode,   0xacb5de96, 0x7b93, 0x4c2f, 0x
 DEFINE_GUID(ff_CODECAPI_AVEncMPVAddSeqEndCode,    0xa823178f, 0x57df, 0x4c7a, 0xb8, 0xfd, 0xe5, 0xec, 0x88, 0x87, 0x70, 0x8d);
 DEFINE_GUID(ff_CODECAPI_AVEncMPVGOPSInSeq,        0x993410d4, 0x2691, 0x4192, 0x99, 0x78, 0x98, 0xdc, 0x26, 0x03, 0x66, 0x9f);
 DEFINE_GUID(ff_CODECAPI_AVEncMPVUseConcealmentMotionVectors,  0xec770cf3, 0x6908, 0x4b4b, 0xaa, 0x30, 0x7f, 0xb9, 0x86, 0x21, 0x4f, 0xea);
+DEFINE_GUID(ff_CODECAPI_AVScenarioInfo, 0xb28a6e64,0x3ff9,0x446a,0x8a,0x4b,0x0d,0x7a,0x53,0x41,0x32,0x36);
 
 // GUIDs missing in mingw, derived from mfnet
 DEFINE_GUID(ff_MF_SA_D3D11_BINDFLAGS, 0xeacf97ad, 0x065c, 0x4408, 0xbe, 0xe3, 0xfd, 0xcb, 0xfd, 0x12, 0x8b, 0xe2);
@@ -156,6 +137,11 @@ enum ff_eAVEncH264PictureType {
     ff_eAVEncH264PictureType_P,
     ff_eAVEncH264PictureType_B
 };
+DEFINE_MEDIATYPE_GUID(ff_MFVideoFormat_HEVC, 0x43564548); // FCC('HEVC')
+DEFINE_MEDIATYPE_GUID(ff_MFVideoFormat_HEVC_ES, 0x53564548); // FCC('HEVS')
+
+
+// This enum is missing from mingw-w64's codecapi.h by v7.0.0.
 enum ff_eAVEncCommonRateControlMode {
     ff_eAVEncCommonRateControlMode_CBR                 = 0,
     ff_eAVEncCommonRateControlMode_PeakConstrainedVBR  = 1,
@@ -166,13 +152,35 @@ enum ff_eAVEncCommonRateControlMode {
     ff_eAVEncCommonRateControlMode_GlobalLowDelayVBR   = 6
 };
 
-// derived from mingw's mfobjects.idl (the C headers don't contain these)
+enum ff_eAVScenarioInfo {
+    ff_eAVScenarioInfo_Unknown                         = 0,
+    ff_eAVScenarioInfo_DisplayRemoting                 = 1,
+    ff_eAVScenarioInfo_VideoConference                 = 2,
+    ff_eAVScenarioInfo_Archive                         = 3,
+    ff_eAVScenarioInfo_LiveStreaming                   = 4,
+    ff_eAVScenarioInfo_CameraRecord                    = 5,
+    ff_eAVScenarioInfo_DisplayRemotingWithFeatureMap   = 6
+};
+
+// These do exist in mingw-w64's mfobjects.idl, but are missing from
+// mfobjects.h that is generated from the former, due to incorrect use of
+// ifdefs in the IDL file.
 enum {
     ff_METransformUnknown = 600,
     ff_METransformNeedInput,
     ff_METransformHaveOutput,
     ff_METransformDrainComplete,
     ff_METransformMarker,
+};
+
+// These do exist in all supported headers, but are manually defined here
+// to avoid having to include codecapi.h, as there's problems including that
+// header when targeting UWP (where including it with MSVC seems to work,
+// but fails when built with clang in MSVC mode).
+enum ff_eAVEncH264VProfile {
+   ff_eAVEncH264VProfile_Base = 66,
+   ff_eAVEncH264VProfile_Main = 77,
+   ff_eAVEncH264VProfile_High = 100,
 };
 
 char *ff_hr_str_buf(char *buf, size_t size, HRESULT hr);
@@ -188,21 +196,16 @@ IMFSample *ff_create_memory_sample(void *fill_data, size_t size, size_t align);
 enum AVSampleFormat ff_media_type_to_sample_fmt(IMFAttributes *type);
 enum AVPixelFormat ff_media_type_to_pix_fmt(IMFAttributes *type);
 const GUID *ff_pix_fmt_to_guid(enum AVPixelFormat pix_fmt);
-int ff_fourcc_from_guid(GUID *guid, uint32_t *out_fourcc);
-char *ff_guid_str_buf(char *buf, size_t buf_size, GUID *guid);
+int ff_fourcc_from_guid(const GUID *guid, uint32_t *out_fourcc);
+char *ff_guid_str_buf(char *buf, size_t buf_size, const GUID *guid);
 #define ff_guid_str(guid) ff_guid_str_buf((char[80]){0}, 80, guid)
 void ff_attributes_dump(void *log, IMFAttributes *attrs);
 void ff_media_type_dump(void *log, IMFMediaType *type);
-int ff_create_mf_buffer_ref(AVCodecContext *avctx, AVFrame *frame,
-                            IMFMediaBuffer *buffer);
 const CLSID *ff_codec_to_mf_subtype(enum AVCodecID codec);
-int ff_init_com_mf(void *log);
-int ff_instantiate_mf(void *log,
-                      GUID category,
+int ff_instantiate_mf(void *log, GUID category,
                       MFT_REGISTER_TYPE_INFO *in_type,
                       MFT_REGISTER_TYPE_INFO *out_type,
-                      int use_hw,
-                      IMFTransform **res);
+                      int use_hw, IMFTransform **res);
 void ff_free_mf(IMFTransform **mft);
 
 #endif
